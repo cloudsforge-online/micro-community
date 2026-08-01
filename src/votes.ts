@@ -158,21 +158,31 @@ export async function castVote(tx: Tx, emit: Emit, input: CastVoteInput): Promis
     throw new ValidationError('this member has no voting power on this proposal')
   }
 
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+  // `on conflict … do nothing returning`, and then RAISE when nothing came back.
+  //
+  // Not a bare INSERT catching 23505, and the reason is a Postgres fact rather than a preference:
+  // **a statement that raises inside a transaction aborts the whole transaction.** The lookup that
+  // makes the error useful — "your power was cast by your delegate B" — would then run on an
+  // aborted transaction and fail with 25P02, so the caller would receive a driver error instead of
+  // the one thing they need to know. A SAVEPOINT would also work and is more machinery for the
+  // same result.
+  //
+  // The conflict clause is NOT swallowing the duplicate. Zero rows is treated as a hard refusal
+  // three lines below, which is the same outcome the raw INSERT gives — `votes.test.ts` proves the
+  // database refuses it with the handler bypassed entirely, so this is a way of ASKING the
+  // constraint rather than a way around it.
+  // ════════════════════════════════════════════════════════════════════════════════════════════
   let ownRows: VoteRow[]
   try {
     ownRows = await tx<VoteRow[]>`
       insert into votes (proposal_id, subject, cast_by, choice, weight)
       values (${input.proposal.id}, ${input.voter}, ${input.voter}, ${input.choice},
               ${input.ownWeight.toString()})
+      on conflict (proposal_id, subject) do nothing
       returning ${tx.unsafe(COLUMNS)}
     `
   } catch (err) {
-    if (isPgError(err, '23505')) {
-      // Somebody already holds this subject's row: either the voter themselves, or their delegate.
-      // The existing row says which, and saying which is what makes the error actionable.
-      const existing = await findVoteFor(tx, input.proposal.id, input.voter)
-      throw new AlreadyVotedError(input.voter, existing?.castBy ?? input.voter)
-    }
     if (isPgError(err, '23514')) {
       // `community_assert_vote_window` — the proposal is not `voting`, or the clock is outside the
       // window. The DATABASE's clock, deliberately: see the trigger.
@@ -182,7 +192,13 @@ export async function castVote(tx: Tx, emit: Emit, input: CastVoteInput): Promis
   }
 
   const own = ownRows[0]
-  if (!own) throw new ValidationError('the vote row was not written')
+  if (!own) {
+    // Somebody already holds this subject's row: either the voter themselves, or their delegate.
+    // The existing row says which, and saying which is what makes the error actionable — a member
+    // told only "already voted" cannot tell a double-click from a proxy they had forgotten about.
+    const existing = await findVoteFor(tx, input.proposal.id, input.voter)
+    throw new AlreadyVotedError(input.voter, existing?.castBy ?? input.voter)
+  }
 
   const delegated: Vote[] = []
   const overriddenBy: string[] = []
