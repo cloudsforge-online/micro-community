@@ -6,50 +6,89 @@
  * a grace period. **Membership that is never re-checked is not token-gating.**"
  *
  * ══════════════════════════════════════════════════════════════════════════════════════════════
- * **`micro-indexer` HAS NO BALANCE ROUTE AND NO BALANCE TABLE. VERIFIED, RECORDED, NOT FIXED.**
+ * **THE BALANCE ROUTE EXISTS NOW, AND THIS CLIENT CALLS IT.**
  *
- * `03-repository-responsibilities.md:44` says the indexer owns "native and token balances", and
- * `07-dependency-map.md:139` makes it a **hard** dependency of this service for exactly this job.
- * Neither is true of the service as it stands:
+ * `07-dependency-map.md:139` makes the indexer a **hard** dependency of this job "at a snapshot
+ * block", and until 18-build-status.md §3.3j that dependency could not be satisfied: the indexer
+ * had no balance route and no balances table. It now serves
+ * `GET /addresses/:chain/:network/:address/token-balances?contract=&block=`, which is the exact
+ * shape this file had already named — so the workaround is deleted rather than adapted.
  *
- *   * Its route table (`indexer/src/server.ts:317-322`, mounted under both `/v1` and bare by
- *     `PREFIXES` at `:124`) is `/chains/:chain/:network/status`,
- *     `/addresses/:chain/:network/:address/activity`, `/transactions/:chain/:network/:hash`,
- *     `/blocks/:chain/:network/:height`, `/watch/...` and `/backfills/...`. There is no balance
- *     route, and none of these answers "what did this address hold of this contract at block N".
- *   * Its schema (`indexer/src/migrations.ts`) creates `blocks`, `transactions`, `logs`,
- *     `address_activity`, `checkpoints`, `reorgs`, `provider_health` and `watched_addresses`.
- *     There is no balances table for a route to read.
- *
- * So the hard dependency this job is supposed to have cannot be satisfied today. The response is
- * `micro-admin-api`'s (18-build-status.md §3.3g): **name the route the upstream would need, and
- * refuse to guess in its absence.** `HTTP_HOLDINGS_ROUTE` below is that name, the client is written
- * against it, and the job's behaviour when it cannot get an answer is the important part:
+ * **What the indexer will and will not answer, and why that is the right shape for a gate.** It
+ * derives the balance by summing an address's recorded token movements, so it will only give one
+ * when the canonical chain it holds runs unbroken from the genesis block to the asked height. When
+ * it does not — and its follower cold-starts near the tip, so an un-backfilled indexer never does
+ * — the `balance` field is **absent** rather than zero. That lands in this client as an unparseable
+ * answer, which lands in the job as `unknown`, which is exactly right:
  *
  *   **AN UNKNOWN HOLDING NEVER DEMOTES.** Not "demote after a while", not "assume zero". A
- *   token-gating check that cannot run must not evict a community's entire membership, and a 404
- *   from a route that does not exist is our own misconfiguration saying nothing about any member's
- *   holdings — the same reading 18-build-status.md §3.3 settled on for market's policy client. The
- *   `unknown` outcome climbs a metric and that is how an operator learns the gate is not running.
+ *   token-gating check that cannot run must not evict a community's entire membership. The
+ *   `unknown` outcome climbs a metric and that is how an operator learns the gate is not running —
+ *   and, now, how they learn the indexer needs a backfill to zero before it can run.
  *
- * Both failures are therefore visible and neither is silent: an unreachable indexer leaves
- * memberships alone and rings a bell, and a working one demotes on a real shortfall.
+ * **What is still missing, plainly: this service does not know any member's chain address.** A
+ * membership's `subject` is `user:<userId>` (`migrations.ts`), there is no address column, and the
+ * mapping from a platform subject to a wallet address is a fact `micro-wallet` holds. 07's
+ * dependency table gives this service no edge to `wallet`, so inventing one here would be inventing
+ * a design. Until that edge exists, `holdingAt` refuses to send a user id to the indexer as if it
+ * were an address — see `chainAddressOf` — and answers `unknown`. The gate is therefore correct
+ * and not yet running, which is a different and much better state than the gate demoting people on
+ * a number nobody derived.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 
+import { chainSpec, ON_CHAIN_ASSETS, type Network } from '@cloudsforge/contracts-chain'
 import { HttpClient, HttpError } from '@cloudsforge/http'
 import type { Db, Emit, Tx } from './outbox.ts'
 import { TOPICS } from './events.ts'
 import type { Community } from './communities.ts'
 
 /**
- * The route this job needs and the indexer does not serve. See the file header.
- *
- * Spelled as the indexer's own conventions would spell it — `:chain/:network/:address`, matching
- * `/addresses/:chain/:network/:address/activity` — so that the day it is built, this client is
- * already pointing at the right shape rather than at something invented here.
+ * The route this job calls, in the indexer's own conventions: `:chain/:network/:address`, matching
+ * `/addresses/:chain/:network/:address/activity`. `clients.test.ts` asserts it is one the indexer
+ * really serves rather than one spelled hopefully here.
  */
 export const HTTP_HOLDINGS_ROUTE = '/addresses/:chain/:network/:address/token-balances'
+
+/**
+ * The indexer's URL slug for a numeric chain id, or null when this estate does not index it.
+ *
+ * A gate stores `gate_chain_id`, a number, because that is what a wallet and a signature agree on.
+ * The indexer's path segment is a slug — `ember`, `eth` — and the two are joined by
+ * `@cloudsforge/contracts-chain`, which is the ONLY place that mapping is allowed to live: it is
+ * exact-pinned precisely so that `wallet`, `settlement`, `custody` and `indexer` cannot disagree
+ * about which chain a number names. Restating it here as a local table is how a community gated on
+ * Hearth mainnet gets re-checked against Hearth testnet.
+ *
+ * Null rather than a guess when nothing matches. A gate configured for a chain the estate does not
+ * index yields `unknown`, and `unknown` never demotes.
+ */
+export function indexerChainFor(chainId: number, network: string): string | null {
+  if (network !== 'mainnet' && network !== 'testnet') return null
+  const wanted: Network = network
+  for (const asset of ON_CHAIN_ASSETS) {
+    if (chainSpec(asset).chainId?.[wanted] === chainId) return asset.toLowerCase()
+  }
+  return null
+}
+
+/** Every EVM chain in `CHAINS` addresses accounts this way, and the indexer stores them lowercased. */
+const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/
+
+/**
+ * The chain address behind a membership subject, or null when there is not one.
+ *
+ * See the file header: this service holds no address for a member, so in practice this returns
+ * null for every real subject and the gate answers `unknown`. It is written as a function rather
+ * than as an inline `slice` so that the day a wallet lookup arrives there is one place to put it,
+ * and so the refusal is a stated decision instead of a user id quietly posted to a chain indexer
+ * as an address — which would spend one 400 per member per cycle, for ever, and log nothing that
+ * named the real problem.
+ */
+export function chainAddressOf(subject: string): string | null {
+  const candidate = subject.startsWith('user:') ? subject.slice('user:'.length) : subject
+  return EVM_ADDRESS.test(candidate) ? candidate.toLowerCase() : null
+}
 
 /** What a re-check concluded about one member. */
 export type GateOutcome = 'holds' | 'short' | 'unknown'
@@ -78,9 +117,9 @@ export interface HoldingsOracle {
 /**
  * An oracle that knows nothing, and says so.
  *
- * The default until the indexer grows the route. Deliberately not "an oracle that returns zero":
- * zero demotes, and a service whose default configuration silently evicts every token-gated
- * member is not a service that should ship.
+ * What a deployment with no `INDEXER_BASE_URL` gets, which is a supported mode. Deliberately not
+ * "an oracle that returns zero": zero demotes, and a service whose default configuration silently
+ * evicts every token-gated member is not a service that should ship.
  */
 export function unavailableOracle(): HoldingsOracle {
   return { holdingAt: async () => null }
@@ -98,13 +137,21 @@ export interface IndexerOracleOptions {
 export const INDEXER_SCOPES: readonly string[] = Object.freeze(['indexer:read'])
 
 /**
- * The HTTP oracle, written against the route named above.
+ * The HTTP oracle, written against the route the indexer serves.
  *
  * Every failure answers `null` rather than throwing, because the caller's only correct response to
  * a failure is "do not demote" and an exception would have to be translated into exactly that at
- * every call site. A 404 is included in that: the route does not exist yet, and when it does, a
- * 404 will mean "this address has never been seen", which is still not evidence that a member sold
- * their tokens.
+ * every call site. **A 404 is included in that, and deliberately still is now that the route
+ * exists**: a 404 here means the indexer has no record of the address, which is not evidence that
+ * a member sold their tokens — it is far more likely to mean this deployment points at an indexer
+ * that has never followed the chain the gate names. Market's escrow client splits its 404 because
+ * "no such transaction" there is a fact the seller must act on; here there is nothing a member did
+ * wrong and nothing to act on but the deployment, so the honest answer is `unknown`.
+ *
+ * A 200 whose `balance` is missing is treated identically, and that path is not hypothetical: the
+ * indexer OMITS `balance` whenever its own coverage cannot support one. So the shape of this
+ * parser — a string of digits, or nothing — is what carries the indexer's honesty through to the
+ * gate without this file having to understand coverage at all.
  */
 export function indexerOracle(options: IndexerOracleOptions): HoldingsOracle {
   const client = new HttpClient({
@@ -117,17 +164,27 @@ export function indexerOracle(options: IndexerOracleOptions): HoldingsOracle {
 
   return {
     async holdingAt(chainId, contract, subject, atBlock) {
-      const address = subject.startsWith('user:') ? subject.slice('user:'.length) : subject
-      const path =
-        `/addresses/${encodeURIComponent(String(chainId))}/${encodeURIComponent(options.network)}` +
-        `/${encodeURIComponent(address)}/token-balances`
+      // Both refusals are `unknown`, and neither costs a request. A chain this estate does not
+      // index, or a subject with no address behind it, is a question the indexer cannot answer;
+      // asking it anyway would turn one configuration mistake into a 400 per member per cycle.
+      const chain = indexerChainFor(chainId, options.network)
+      if (chain === null) return null
+      const address = chainAddressOf(subject)
+      if (address === null) return null
+
+      const scope = `${encodeURIComponent(chain)}/${encodeURIComponent(options.network)}`
+      const path = `/addresses/${scope}/${encodeURIComponent(address)}/token-balances`
       const query = new URLSearchParams({ contract })
+      // The snapshot block 07-dependency-map asks for. Absent means "at the head the indexer has
+      // walked", which is what a periodic re-check wants.
       if (atBlock !== null) query.set('block', atBlock.toString())
       try {
         const body = await client.request<{ balance?: unknown }>(`${path}?${query.toString()}`, {
           method: 'GET',
         })
-        // A decimal string, in both directions. A JSON number would not survive a uint256.
+        // A decimal string, in both directions. A JSON number would not survive a uint256, and the
+        // indexer omits the field entirely rather than defaulting it — so `undefined` arrives here
+        // as `unknown`, which never demotes.
         if (typeof body.balance !== 'string' || !/^\d+$/.test(body.balance)) return null
         return { balance: BigInt(body.balance) }
       } catch (err) {

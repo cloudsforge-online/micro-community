@@ -39,7 +39,14 @@ import {
   httpPolicyClient,
   spendResourceUrn,
 } from './policyclient.ts'
-import { HTTP_HOLDINGS_ROUTE, INDEXER_SCOPES, indexerOracle, unavailableOracle } from './gating.ts'
+import {
+  HTTP_HOLDINGS_ROUTE,
+  INDEXER_SCOPES,
+  chainAddressOf,
+  indexerChainFor,
+  indexerOracle,
+  unavailableOracle,
+} from './gating.ts'
 
 /* ------------------------------------------------------------------ the recorder */
 
@@ -491,49 +498,120 @@ test('the policy scope matches what policy requires', () => {
   assert.deepEqual([...POLICY_SCOPES], ['policy:decide'])
 })
 
+
 /* ------------------------------------------------------------------ the indexer */
 
 /**
- * `micro-indexer`'s real route table, read from `indexer/src/server.ts:317-322` and mounted under
- * both `/v1` and bare by `PREFIXES` at `:124`.
+ * `micro-indexer`'s real route table, read from `indexer/src/server.ts` and mounted under both
+ * `/v1` and bare by `PREFIXES`.
  *
- * **There is no balance route, and no balances table** (`indexer/src/migrations.ts` creates
- * blocks, transactions, logs, address_activity, checkpoints, reorgs, provider_health and
- * watched_addresses). See gating.ts.
+ * **The balance route is on this list now.** It was not when this file was written, and the test
+ * below has been turned round: it used to assert the absence and carry a note saying what to do
+ * when it appeared. It appeared (18-build-status.md §3.3j), so the note is spent and the assertion
+ * is the opposite one — that the route this service calls is one the indexer really serves.
  */
 const INDEXER_ROUTES: readonly string[] = Object.freeze([
   'GET /chains/:chain/:network/status',
   'GET /addresses/:chain/:network/:address/activity',
+  'GET /addresses/:chain/:network/:address/token-balances',
   'GET /transactions/:chain/:network/:hash',
+  'GET /transactions/:chain/:network/:hash/confirmations',
   'GET /blocks/:chain/:network/:height',
   'POST /watch/:chain/:network/:address',
   'POST /backfills/:chain/:network',
 ])
 
-test('the holdings route this service needs is one micro-indexer does not serve', () => {
-  // Recorded rather than papered over. The consequence is handled in gating.ts: an unknown holding
-  // never demotes anybody, so token gating degrades to "not re-checked" rather than to "everybody
-  // evicted", and `community_gate_checks_total{outcome="unknown"}` is how an operator learns.
+/** A real 20-byte address. The oracle refuses anything else before it makes a request. */
+const HOLDER = `0x${'d'.repeat(40)}`
+
+test('the holdings route this service needs is one micro-indexer serves', () => {
   assert.ok(
-    !INDEXER_ROUTES.includes(`GET ${HTTP_HOLDINGS_ROUTE}`),
-    'micro-indexer now serves a token-balance route — wire it up and update the README',
+    INDEXER_ROUTES.includes(`GET ${HTTP_HOLDINGS_ROUTE}`),
+    `micro-indexer does not serve ${HTTP_HOLDINGS_ROUTE} — the gate cannot run, and gating.ts must say so`,
   )
-  // The named route follows the indexer's own conventions, so the day it is built this client is
-  // already pointing at the right shape rather than at something invented here.
+  // Still the indexer's conventions rather than something spelled here: `:chain/:network/:address`.
   assert.match(HTTP_HOLDINGS_ROUTE, /^\/addresses\/:chain\/:network\/:address\//)
   assert.deepEqual([...INDEXER_SCOPES], ['indexer:read'])
 })
 
 test('the unavailable oracle answers unknown, never zero', async () => {
   // Zero demotes. A service whose default configuration silently evicts every token-gated member is
-  // not a service that should ship.
+  // not a service that should ship, and `INDEXER_BASE_URL` unset is a supported mode.
   const oracle = unavailableOracle()
-  assert.equal(await oracle.holdingAt(7411, '0xabc', 'user:u1', null), null)
+  assert.equal(await oracle.holdingAt(7411, '0xabc', `user:${HOLDER}`, null), null)
+})
+
+test('a chain id lands on the slug the indexer puts in a path, from the pinned contract', () => {
+  // The one mapping `@cloudsforge/contracts-chain` is here for. Restating it locally is how a
+  // community gated on Hearth MAINNET gets re-checked against Hearth TESTNET, which is the same
+  // class of defect as XRP sharing one address across both networks.
+  assert.equal(indexerChainFor(7411, 'mainnet'), 'ember')
+  assert.equal(indexerChainFor(7412, 'testnet'), 'ember')
+  assert.equal(indexerChainFor(1, 'mainnet'), 'eth')
+  // Right number, wrong network. Not a match, and emphatically not "close enough".
+  assert.equal(indexerChainFor(7411, 'testnet'), null)
+  assert.equal(indexerChainFor(999_999, 'mainnet'), null)
+  assert.equal(indexerChainFor(7411, 'devnet'), null)
+})
+
+test('the oracle asks the indexer for the chain by slug, at the block it was given', async () => {
+  const huge = 2n ** 200n
+  const { fetch, calls } = recorder({ status: 200, body: { balance: huge.toString() } })
+  const oracle = indexerOracle({
+    baseUrl: 'http://indexer:4000',
+    token: () => 't',
+    deadlineMs: 100,
+    network: 'testnet',
+    fetch,
+  })
+  // 7412 is EMBER on testnet. The indexer's segment is the slug, never the number.
+  const holding = await oracle.holdingAt(7412, '0xabc', `user:${HOLDER}`, 99n)
+  assert.equal(holding?.balance, huge, 'a uint256 survives as a bigint, exactly')
+
+  const url = new URL(calls[0]!.url)
+  assert.equal(url.pathname, `/addresses/ember/testnet/${HOLDER}/token-balances`)
+  assert.equal(url.searchParams.get('contract'), '0xabc')
+  // The snapshot block 07-dependency-map.md:139 asks for, spelled as the indexer's `block` param.
+  assert.equal(url.searchParams.get('block'), '99')
+})
+
+test('a chain the estate does not index is unknown, and costs no request', async () => {
+  const { fetch, calls } = recorder({ status: 200, body: { balance: '1' } })
+  const oracle = indexerOracle({
+    baseUrl: 'http://indexer:4000',
+    token: () => 't',
+    deadlineMs: 100,
+    network: 'mainnet',
+    fetch,
+  })
+  assert.equal(await oracle.holdingAt(424_242, '0xabc', `user:${HOLDER}`, null), null)
+  assert.equal(calls.length, 0, 'a question the indexer cannot answer is not worth asking')
+})
+
+test('a subject with no chain address behind it is unknown, and costs no request', async () => {
+  // THE GAP THAT REMAINS, PINNED. A membership subject is `user:<userId>` and this service holds no
+  // address for a member — that mapping is `micro-wallet`'s and 07's dependency table gives this
+  // service no edge to it. Posting a user id to a chain indexer as an address would spend one 400
+  // per member per cycle and name nothing; `unknown` never demotes, and the metric says so.
+  const { fetch, calls } = recorder({ status: 200, body: { balance: '1' } })
+  const oracle = indexerOracle({
+    baseUrl: 'http://indexer:4000',
+    token: () => 't',
+    deadlineMs: 100,
+    network: 'mainnet',
+    fetch,
+  })
+  assert.equal(await oracle.holdingAt(7411, '0xabc', 'user:01J0ABCDEF', null), null)
+  assert.equal(calls.length, 0)
+  assert.equal(chainAddressOf('user:01J0ABCDEF'), null)
+  // And an EIP-55 checksummed address is normalised rather than refused — every wallet displays
+  // that form, and the indexer stores addresses lowercased.
+  assert.equal(chainAddressOf(`user:0x${'D'.repeat(40)}`), `0x${'d'.repeat(40)}`)
 })
 
 test('the indexer oracle answers unknown on any failure, including a 404', async () => {
-  for (const status of [404, 500, 503, 401]) {
-    const { fetch } = recorder({ status, body: {} })
+  for (const status of [400, 404, 500, 503, 401]) {
+    const { fetch, calls } = recorder({ status, body: {} })
     const oracle = indexerOracle({
       baseUrl: 'http://indexer:4000',
       token: () => 't',
@@ -542,10 +620,13 @@ test('the indexer oracle answers unknown on any failure, including a 404', async
       fetch,
     })
     assert.equal(
-      await oracle.holdingAt(7411, '0xabc', 'user:u1', null),
+      await oracle.holdingAt(7411, '0xabc', `user:${HOLDER}`, null),
       null,
       `a ${status} became something other than unknown`,
     )
+    // At least one — the client retries some statuses. What matters is that the request WAS made,
+    // so this is a test of the failure handling rather than of the two guards above it.
+    assert.ok(calls.length >= 1, 'no request was made, so this assertion would be vacuous')
   }
 })
 
@@ -560,25 +641,28 @@ test('the oracle refuses a balance that is not a decimal string', async () => {
     network: 'mainnet',
     fetch,
   })
-  assert.equal(await oracle.holdingAt(7411, '0xabc', 'user:u1', null), null)
+  assert.equal(await oracle.holdingAt(7411, '0xabc', `user:${HOLDER}`, null), null)
 })
 
-test('the oracle reads a decimal string as a bigint, exactly', async () => {
-  const huge = 2n ** 200n
-  const { fetch, calls } = recorder({ status: 200, body: { balance: huge.toString() } })
-  const oracle = indexerOracle({
-    baseUrl: 'http://indexer:4000',
-    token: () => 't',
-    deadlineMs: 100,
-    network: 'testnet',
-    fetch,
-  })
-  const holding = await oracle.holdingAt(7411, '0xabc', 'user:0xdead', 99n)
-  assert.equal(holding?.balance, huge)
-
-  const url = new URL(calls[0]!.url)
-  // The `user:` prefix is stripped — an address is what the indexer keys on.
-  assert.match(url.pathname, /\/addresses\/7411\/testnet\/0xdead\/token-balances$/)
-  assert.equal(url.searchParams.get('contract'), '0xabc')
-  assert.equal(url.searchParams.get('block'), '99')
+test('a 200 with no balance at all is unknown, which is how the indexer says it cannot vouch', async () => {
+  // NOT a hypothetical shape. The indexer derives a balance by summing recorded movements, so it
+  // OMITS the field whenever its canonical chain does not run unbroken from genesis to the asked
+  // height — which an un-backfilled follower's never does. Absent must land as `unknown`, because
+  // reading it as zero would evict every member of every token-gated community the first time a
+  // fresh indexer was pointed at.
+  for (const body of [{}, { balance: null }, { coverage: { complete: false } }]) {
+    const { fetch } = recorder({ status: 200, body })
+    const oracle = indexerOracle({
+      baseUrl: 'http://indexer:4000',
+      token: () => 't',
+      deadlineMs: 100,
+      network: 'mainnet',
+      fetch,
+    })
+    assert.equal(
+      await oracle.holdingAt(7411, '0xabc', `user:${HOLDER}`, null),
+      null,
+      JSON.stringify(body),
+    )
+  }
 })

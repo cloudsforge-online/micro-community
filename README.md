@@ -287,10 +287,12 @@ point is not theoretical.
 
 ---
 
-## Findings in sibling repositories — recorded, not fixed
+## Findings about the neighbours — recorded, and two now closed
 
-Each of these was verified against source rather than taken from a document. None is fixed here:
-they are other repositories', and this one does not modify them.
+Each of these was verified against source rather than taken from a document. They were recorded
+rather than fixed, because they were other repositories'. Two of them have since been closed by the
+work 18-build-status.md §3.3j describes, and the entries below say which — a finding that stops
+being true and is left standing is worse than one that was never written down.
 
 ### 1. Policy cannot express a community subject, and has no community action
 
@@ -324,45 +326,76 @@ Also: `market/src/policyclient.ts:27` declares `POLICY_SCOPES = ['policy:evaluat
 scope policy knows — `policy/src/server.ts:83` defines `DECIDE_SCOPE = 'policy:decide'`. This
 repository uses `policy:decide`.
 
-### 2. The indexer has no balance route and no balances table
+### 2. The indexer's balance route — named here, then built, and now called
 
-`03-repository-responsibilities.md:44` says `cloudsforge-indexer` owns "native and token balances",
-and `07-dependency-map.md:139` makes it a **hard** dependency of this service's token-gate
-re-evaluation job "at a snapshot block". Neither is true of the service as it stands:
+**Resolved.** `07-dependency-map.md:139` makes the indexer a **hard** dependency of this service's
+token-gate re-evaluation job "at a snapshot block", and when this repository was written that
+dependency could not be satisfied: `micro-indexer` had no balance route and no balances table. The
+response was `micro-admin-api`'s (§3.3g) — *name the route the upstream would need and refuse to
+guess in its absence* — and `HTTP_HOLDINGS_ROUTE` was that name, spelled in the indexer's own
+conventions so that the day it was built this client would already be pointing at the right shape.
 
-- Its route table (`indexer/src/server.ts:317-322`, mounted under both `/v1` and bare by `PREFIXES`
-  at `:124`) is `/chains/:chain/:network/status`,
-  `/addresses/:chain/:network/:address/activity`, `/transactions/:chain/:network/:hash`,
-  `/blocks/:chain/:network/:height`, `/watch/…` and `/backfills/…`. **No balance route**, and none
-  of these answers "what did this address hold of this contract at block N".
-- Its schema (`indexer/src/migrations.ts`) creates `blocks`, `transactions`, `logs`,
-  `address_activity`, `checkpoints`, `reorgs`, `provider_health` and `watched_addresses`. **No
-  balances table** for a route to read.
+It was built to that shape (18-build-status.md §3.3j). `micro-indexer` now serves
+`GET /addresses/:chain/:network/:address/token-balances?contract=&block=`, `gating.ts` calls it,
+and `clients.test.ts`'s assertion has been turned round — it used to assert the route was absent
+and carry a note saying what to do when it appeared.
 
-Handled as `micro-admin-api` handled its missing executor (§3.3g): **name the route the upstream
-would need and refuse to guess in its absence.** `HTTP_HOLDINGS_ROUTE` in `gating.ts` is that name,
-spelled in the indexer's own conventions, and the behaviour when no answer arrives is the part that
-matters — **an unknown holding never demotes.** Not "demote after a while", not "assume zero". A
-token-gating check that cannot run must not evict a community's entire membership, and a 404 from a
-route that does not exist is our own misconfiguration saying nothing about anybody's holdings.
-`community_gate_checks_total{outcome="unknown"}` climbing is how an operator learns the gate is not
-running. `INDEXER_BASE_URL` unset is therefore a **supported mode**.
+**What the indexer will not answer, and why that is right.** It derives a balance by summing an
+address's recorded token movements, so it only returns one when the canonical chain it holds runs
+unbroken from the genesis block to the asked height. Its follower cold-starts near the tip, so an
+indexer that has not been backfilled to zero **omits the `balance` field entirely** rather than
+returning the window's total. That lands here as an unparseable answer and in the job as `unknown`:
 
-### 3. `market/src/indexerclient.ts` calls two routes the indexer does not serve
+  **AN UNKNOWN HOLDING NEVER DEMOTES.** Not "demote after a while", not "assume zero". A
+  token-gating check that cannot run must not evict a community's entire membership.
+  `community_gate_checks_total{outcome="unknown"}` climbing is how an operator learns the gate is
+  not running — and now also how they learn the indexer needs `POST /backfills/:chain/:network`
+  run to zero before it can. `INDEXER_BASE_URL` unset remains a **supported mode**.
 
-A fourth instance of the §3.3 class, found the same way — a new service reading the upstream's real
-route table while writing its own client.
+`@cloudsforge/contracts-chain` is a dependency for exactly one mapping: a gate stores a numeric
+`gate_chain_id` and the indexer's path segment is a slug. Restating that locally is how a community
+gated on Hearth mainnet gets re-checked against Hearth testnet, so it is read from the exact-pinned
+package and never from a table here.
 
-- `market/src/indexerclient.ts:89` calls `GET /v1/tokens/:urn/facts`.
-- `market/src/indexerclient.ts:105` calls `GET /v1/chains/:chain/transactions/:hash/escrow`.
+### 3. This service still holds no chain address for a member
 
-Neither exists in `indexer/src/server.ts:317-322`. The first is swallowed as `null` ("the indexer
-has never seen this item"), so a listing's on-chain indicators are permanently absent rather than
-wrong. The second returns `{confirmed: false}` on a 404, so **an escrowed listing would never
-confirm** — every non-custodial listing refused for want of a confirmation that can never arrive.
-Reported, not fixed.
+**Open, and the reason the gate is correct but not yet running.** A membership's `subject` is
+`user:<userId>`; there is no address column anywhere in `migrations.ts`, and the mapping from a
+platform subject to a wallet address is a fact `micro-wallet` holds. 07's dependency table gives
+this service **no edge to `wallet`**, so inventing one here would be inventing a design rather than
+implementing one.
 
-### 4. `community.*` is not a registered event topic
+`chainAddressOf` therefore refuses to post a user id to a chain indexer as if it were an address —
+which would spend one 400 per member per re-check cycle for ever and name nothing — and answers
+`unknown`. `clients.test.ts` pins that refusal, so the gap is a tested, named thing rather than a
+silent one. Closing it needs an address on the membership and an edge in 07, both of which are
+somebody's decision and not this repository's.
+
+### 4. `market/src/indexerclient.ts` and the escrow route
+
+**Half resolved.** Two routes were reported here as calls to paths the indexer did not serve:
+
+- `GET /v1/tokens/:urn/facts` — swallowed as `null`, so a listing's on-chain indicators were
+  permanently absent rather than wrong.
+- `GET /v1/chains/:chain/transactions/:hash/escrow` — returned `{confirmed: false}` on a 404, so
+  **every non-custodial listing was refused for want of a confirmation that could never arrive.**
+
+The second is fixed at both ends: the indexer serves
+`GET /transactions/:chain/:network/:hash/confirmations` and answers **404 `transaction_not_found`**
+for a transaction it has never seen, and `micro-market` branches on that code — a never-seen
+transaction is a fact the seller is told, any other 404 stays an outage.
+
+The first is not, and is not waiting on the indexer. It is keyed by a `micro-mint` item URN the
+indexer has no registry for, and five of `TokenFacts`' eight fields are contract state or custody
+state that a chain indexer does not and should not hold. It is a gap in the estate's design rather
+than an unbuilt route, and it fails as an outage until something owns it.
+
+One correction to the note this section used to carry: `micro-indexer` **does** serve `/v1` paths.
+`PREFIXES` (`indexer/src/server.ts:124`) mounts every domain route under both `/v1` and bare. The
+old calls 404'd because there is no `/tokens` route and no `/escrow` sub-resource, not because of
+the prefix.
+
+### 5. `community.*` is not a registered event topic
 
 `07-dependency-map.md:180` names `community.proposal.executed`, keyed by `proposal_id`, with ledger,
 activity and notify as its consumers. `contracts/packages/events/src/index.ts` registers **no
