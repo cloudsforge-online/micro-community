@@ -55,7 +55,7 @@ function recorder(reply: { status: number; body: unknown }): {
   calls: Captured[]
 } {
   const calls: Captured[] = []
-  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const raw = typeof init?.body === 'string' ? init.body : '{}'
     calls.push({
       url: String(input),

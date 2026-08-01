@@ -49,12 +49,17 @@ after(async () => {
  *
  * `votes.weight`             Voting power, which is a token balance in one model. It is a snapshot
  *                            used for arithmetic, never spendable, and never decremented — the
- *                            `votes_immutable` trigger refuses an UPDATE outright.
+ *                            `votes_immutable` trigger refuses any UPDATE that touches it.
+ *
+ * `proposals.quorum`         A floor on participation, compared against the summed weight. It is
+ *                            numeric(78,0) rather than bigint so the comparison is between things
+ *                            of the same size; it holds nothing.
  */
 const AMOUNT_COLUMNS_WITH_REASONS: Readonly<Record<string, string>> = {
   'proposals.spend_amount': 'the mandate a community voted for; the movement is a ledger entry',
   'communities.gate_min_holding': 'a threshold this service compares against; it holds nothing',
   'votes.weight': 'voting power, immutable and never spendable',
+  'proposals.quorum': 'a floor on participation, compared against a sum; it holds nothing',
 }
 
 test('no column in this schema is a balance', { skip }, async () => {
@@ -112,9 +117,9 @@ test('every amount column is numeric(78,0) — never a float, never an integer',
     select table_name || '.' || column_name as name, data_type, numeric_precision, numeric_scale
       from information_schema.columns
      where table_schema = 'public'
-       and table_name || '.' || column_name in ('proposals.spend_amount','communities.gate_min_holding','votes.weight')
+       and table_name || '.' || column_name in ('proposals.spend_amount','communities.gate_min_holding','votes.weight','proposals.quorum')
   `
-  assert.equal(rows.length, 3)
+  assert.equal(rows.length, 4)
   for (const row of rows) {
     // 78 digits holds any uint256 (max ~1.16e77). Scale 0 because these are smallest units and a
     // fractional smallest unit is not a thing.
@@ -124,17 +129,22 @@ test('every amount column is numeric(78,0) — never a float, never an integer',
   }
 })
 
-test('quorum is a bigint and threshold_bps is an integer', { skip }, async () => {
-  const rows = await sql<{ column_name: string; data_type: string }[]>`
-    select column_name, data_type from information_schema.columns
+test('quorum is numeric(78,0) and threshold_bps is an integer', { skip }, async () => {
+  // quorum is numeric rather than bigint because it is compared against the summed vote weight,
+  // and a token-weighted weight is a uint256. A bigint quorum tops out at 2^63-1, so a community
+  // holding 10^24 smallest units of its own token could not express a quorum its members could
+  // reach — the comparison would be between things of different sizes.
+  const rows = await sql<{ column_name: string; data_type: string; numeric_precision: number | null }[]>`
+    select column_name, data_type, numeric_precision from information_schema.columns
      where table_schema = 'public' and table_name = 'proposals'
        and column_name in ('quorum','threshold_bps')
      order by column_name
   `
   assert.deepEqual(
     rows.map((row) => `${row.column_name}:${row.data_type}`),
-    ['quorum:bigint', 'threshold_bps:integer'],
+    ['quorum:numeric', 'threshold_bps:integer'],
   )
+  assert.equal(rows[0]?.numeric_precision, 78)
 })
 
 /* ------------------------------------------------------------------ the objects that matter */

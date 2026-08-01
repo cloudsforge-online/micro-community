@@ -288,7 +288,12 @@ export const MIGRATIONS: readonly Migration[] = [
         title           text        not null,
         body            text        not null default '',
         voting_model    text        not null,
-        quorum          bigint      not null,
+        -- numeric(78,0), NOT bigint, and the reason is arithmetic rather than taste: quorum is
+        -- compared against the summed vote weight, and a token-weighted weight is a uint256. A
+        -- bigint quorum tops out at 2^63-1, so a community holding 10^24 smallest units of its own
+        -- token could not express a quorum its members could reach. The two must be the same type
+        -- or the comparison is between things of different sizes.
+        quorum          numeric(78,0) not null,
         threshold_bps   integer     not null,
         snapshot_block  bigint,
         opens_at        timestamptz not null,
@@ -575,15 +580,36 @@ export const MIGRATIONS: readonly Migration[] = [
         before insert on votes
         for each row execute function community_assert_vote_window();
 
-      -- A recorded vote is not editable. Changing a cast vote after the fact is indistinguishable
-      -- from the platform changing it, and a governance record that can be rewritten is not a
-      -- record. Withdrawal is a DELETE while the proposal is still open, which \`votes.ts\` gates.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- THE ARITHMETIC OF A RECORDED VOTE IS IMMUTABLE. THE IDENTITY ON IT IS NOT.
+      --
+      -- Changing a cast vote after the fact is indistinguishable from the platform changing it, and
+      -- a governance record that can be rewritten is not a record. So \`choice\`, \`weight\` and
+      -- \`proposal_id\` are refused outright — withdrawal is a DELETE while the proposal is still
+      -- open, which \`votes.ts\` gates.
+      --
+      -- \`subject\` and \`cast_by\` ARE writable, and that is a deliberate exception with exactly one
+      -- caller: the \`identity.user.deleted\` handler. Erasure here has to be pseudonymisation rather
+      -- than deletion, because deleting the row would silently change a historical tally and could
+      -- retroactively un-pass a proposal whose money has already moved — leaving an execution with
+      -- no mandate and no way to reconstruct one. Rewriting the subject to an opaque token leaves
+      -- the arithmetic untouched and the person unidentifiable, which is what erasure needs to
+      -- mean in a governance record. See \`server.ts\`'s \`eraseSubject\`.
+      --
+      -- Refusing the whole UPDATE would not make the record safer; it would make GDPR erasure
+      -- impossible without a DELETE, which is strictly worse.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
       create or replace function community_refuse_vote_update() returns trigger
         language plpgsql
       as $$
       begin
-        raise exception 'a recorded vote is immutable; withdraw it and cast again'
-          using errcode = 'check_violation';
+        if new.choice is distinct from old.choice
+           or new.weight is distinct from old.weight
+           or new.proposal_id is distinct from old.proposal_id then
+          raise exception 'a recorded vote is immutable; withdraw it and cast again'
+            using errcode = 'check_violation';
+        end if;
+        return new;
       end;
       $$;
 
