@@ -139,7 +139,7 @@ import {
   type ExecuteDeps,
 } from './executions.ts'
 import { PolicyUnavailableError } from './policyclient.ts'
-import { EXECUTE_SCOPE, SCOPES, SCOPE_NAMES, grantsScope, type Scope } from './scopes.ts'
+import { WRITE_SCOPE, EXECUTE_SCOPE, SCOPES, SCOPE_NAMES, grantsScope, type Scope } from './scopes.ts'
 import { EXECUTE_KIND, executeKey } from './jobs.ts'
 import { USER_DELETED_TOPIC } from './events.ts'
 
@@ -1053,7 +1053,7 @@ function buildRoutes(): Route[] {
     define('POST', '/internal/proposals/:id/enqueue-execution', async (ctx, deps) => {
       // The re-arm an operator reaches for when an execute job has dead-lettered. It schedules;
       // it does not execute, so it needs no treasury authority and carries `community:write`.
-      await authenticateService(ctx, deps, 'community:write')
+      await authenticateService(ctx, deps, WRITE_SCOPE)
       const proposalId = idParam(ctx)
       const proposal = await findProposal(deps.sql, proposalId)
       if (!proposal) throw new NotFoundError('no such proposal')
