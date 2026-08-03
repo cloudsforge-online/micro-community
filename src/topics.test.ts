@@ -14,7 +14,7 @@
  *      tested against imagined counterparts. **This service was one of the six**, and it also
  *      carried the drifted local signature — so a delivery from here was refused twice over. The
  *      only check that could have caught either is the one below: build an envelope with the
- *      relay's own `buildEnvelope`, hand it to the contract's own `validateEnvelope`, and sign it
+ *      relay's own `buildEnvelope`, hand it to the contract's own `classifyEnvelope`, and sign it
  *      with the relay's own `signEvent` before handing that to the contract's `verifyDelivery`.
  *
  * No database. Pure text, set arithmetic and one function call, so it runs in CI even when the
@@ -223,6 +223,36 @@ test('envelopeDefects excuses a lagging registry and nothing else', () => {
   assert.ok(
     envelopeDefects(broken).some((error) => error.startsWith('version:')),
     'an integer version must be reported however the topic is registered',
+  )
+})
+
+/**
+ * The case that separates this repository's `envelopeDefects` from the contract's own
+ * `envelopeDefects(value, awaitingRegistration)`, which ships beside `classifyEnvelope` and looks
+ * like a drop-in for it.
+ *
+ * "Malformed" and "not in this registry" are two facts with two remedies — a producer bug, and a
+ * missing registration — and an envelope can carry both. `classifyEnvelope` keeps both, deliberately
+ * (`unregisteredTopic` survives on a `malformed` verdict). The contract's flattening wrapper drops
+ * the topic whenever any other defect is present, so the author is sent to fix one thing twice.
+ *
+ * Every other assertion in this suite stays green under that wrapper. This is the only one that
+ * would go red, which is the point of writing it.
+ */
+test('an unproposed topic AND a broken version are reported together, not one per round', () => {
+  const both = {
+    ...buildEnvelope(ROW),
+    topic: 'community.nothing.happened',
+    version: 1 as unknown as string,
+  }
+  const defects = envelopeDefects(both)
+  assert.ok(
+    defects.some((error) => error.startsWith('version:')),
+    `the producer bug must be named: ${defects.join('; ')}`,
+  )
+  assert.ok(
+    defects.some((error) => error.includes('community.nothing.happened')),
+    `the missing registration must be named too: ${defects.join('; ')}`,
   )
 })
 
