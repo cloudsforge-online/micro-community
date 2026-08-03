@@ -2,7 +2,9 @@
 
 Communities and governance. Communities, membership, roles, treasury accounts, proposals,
 discussion, votes, delegations, timelocks and executions —
-[03-repository-responsibilities.md:47](../docs/ecosystem/03-repository-responsibilities.md).
+[03-repository-responsibilities.md:47](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/03-repository-responsibilities.md).
+
+Design authority: [`ecosystem/03-repository-responsibilities.md`](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/03-repository-responsibilities.md)
 
 **A governance system moves money by vote.** That single fact puts this service in the same class
 as `ledger`, `market`, `settlement` and `foresight`, and the four sections below are the four
@@ -224,7 +226,7 @@ proposal's window or in any status but `voting`, again on the database's clock.
 
 **`granted.includes(required)`. `community:*` grants nothing here.**
 
-[18-build-status.md §3.3h](../docs/ecosystem/18-build-status.md) records that the estate ships two
+[18-build-status.md §3.3h](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/18-build-status.md) records that the estate ships two
 scope matchers that disagree:
 
 | Package | Line | Semantics |
@@ -482,3 +484,10 @@ pnpm migrate
 `index.ts` asserts the schema version and refuses to serve below it. Below `SCHEMA_VERSION` the
 timelock trigger and the vote uniqueness constraint may not exist, and a service that could create
 them at boot is a service that could start without them.
+
+---
+
+## Provenance
+
+The code in this repository was written by **Claude Opus 5** and **Claude Fable 5**, under
+human direction and review.
