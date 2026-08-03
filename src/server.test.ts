@@ -581,12 +581,12 @@ test('erasure pseudonymises the governance record rather than deleting it', { sk
     payload: { userId: 'bob' },
   }
   const body = JSON.stringify(envelope)
-  const { signEvent } = await import('./outbox.ts')
+  const { signEvent, SIGNATURE_HEADER } = await import('./outbox.ts')
   const response = await fetch(`${baseUrl}/v1/events`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-cloudsforge-signature': signEvent(body, 'a-signing-secret-long-enough-000'),
+      [SIGNATURE_HEADER]: signEvent(body, 'a-signing-secret-long-enough-000'),
     },
     body,
   })
@@ -612,12 +612,12 @@ test('a redelivered erasure event is a duplicate, not a second erasure', { skip 
   const send = async () => {
     const envelope = { id, topic: 'identity.user.deleted', payload: { userId: 'ghost' } }
     const body = JSON.stringify(envelope)
-    const { signEvent } = await import('./outbox.ts')
+    const { signEvent, SIGNATURE_HEADER } = await import('./outbox.ts')
     return fetch(`${baseUrl}/v1/events`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-cloudsforge-signature': signEvent(body, 'a-signing-secret-long-enough-000'),
+        [SIGNATURE_HEADER]: signEvent(body, 'a-signing-secret-long-enough-000'),
       },
       body,
     })
@@ -631,12 +631,12 @@ test('an unsubscribed topic is accepted and ignored with a 202', { skip }, async
   // not to act on, for ever.
   const envelope = { id: crypto.randomUUID(), topic: 'mint.token.deployed', payload: {} }
   const body = JSON.stringify(envelope)
-  const { signEvent } = await import('./outbox.ts')
+  const { signEvent, SIGNATURE_HEADER } = await import('./outbox.ts')
   const response = await fetch(`${baseUrl}/v1/events`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-cloudsforge-signature': signEvent(body, 'a-signing-secret-long-enough-000'),
+      [SIGNATURE_HEADER]: signEvent(body, 'a-signing-secret-long-enough-000'),
     },
     body,
   })

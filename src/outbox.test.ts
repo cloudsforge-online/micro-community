@@ -27,6 +27,8 @@ import assert from 'node:assert/strict'
 import type postgres from 'postgres'
 import type { HttpClient } from '@cloudsforge/http'
 import {
+  EVENT_ID_HEADER,
+  SIGNATURE_HEADER,
   createRelay,
   signEvent,
   verifyEventSignature,
@@ -184,13 +186,13 @@ test('a delivery is signed over the exact bytes sent', { skip }, async () => {
 
   assert.ok(seen !== null)
   const { envelope, headers } = seen as { envelope: EventEnvelope; headers: Record<string, string> }
-  const signature = headers['x-cloudsforge-signature']
+  const signature = headers[SIGNATURE_HEADER]
   assert.ok(signature)
   // A subscriber recomputes the MAC over the received body, so the two must agree byte for byte.
   assert.ok(verifyEventSignature(JSON.stringify(envelope), SECRET, signature!))
   // And a different secret does not verify — otherwise this asserts nothing.
   assert.equal(verifyEventSignature(JSON.stringify(envelope), 'another-secret-long-enough-0000', signature!), false)
-  assert.equal(headers['x-event-id'], envelope.id)
+  assert.equal(headers[EVENT_ID_HEADER], envelope.id)
 })
 
 test('signature verification is length-safe', { skip: false }, () => {
@@ -198,6 +200,9 @@ test('signature verification is length-safe', { skip: false }, () => {
   const good = signEvent(body, SECRET)
   assert.equal(verifyEventSignature(body, SECRET, good), true)
   // A shorter presented value must not throw inside `timingSafeEqual`, which requires equal lengths.
+  // `sha256=<hex>` is the DRIFTED local scheme this service used to sign with; it must now be
+  // refused as a malformed header rather than quietly accepted, or the migration to the contract's
+  // scheme would be a scheme this service still answers to.
   assert.equal(verifyEventSignature(body, SECRET, 'sha256=abc'), false)
   assert.equal(verifyEventSignature(body, SECRET, ''), false)
   assert.equal(verifyEventSignature('{"a":2}', SECRET, good), false)

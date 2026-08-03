@@ -1,25 +1,16 @@
 /**
  * The topics this service produces.
  *
- * ══════════════════════════════════════════════════════════════════════════════════════════════
- * **`community.*` IS NOT REGISTERED IN `@cloudsforge/contracts-events`. RECORDED, NOT FIXED.**
+ * **THREE OF THE ELEVEN ARE NOW REGISTERED.** The sentence that stood here — "`community.*` is not
+ * registered in `@cloudsforge/contracts-events`" — was true when it was written and is false now:
+ * contracts 9b19dd1 adopted `community.proposal.opened` and `community.vote.cast` alongside the
+ * `community.proposal.executed` it already had, all three keyed by `proposal_id`. `activity`
+ * classifies each and `notify` has a rule for each.
  *
- * `07-dependency-map.md:180` names `community.proposal.executed`, keyed by `proposal_id`, with
- * ledger, activity and notify as its consumers. `contracts/packages/events/src/index.ts` registers
- * no `community.*` topic — though `'community'` IS a valid `ProducerService` in that file's union,
- * so the gap is an omission from `TOPICS` rather than a decision that this service produces
- * nothing.
- *
- * The consequence is the same one `micro-devplatform` hit and recorded (18-build-status.md §3.3h,
- * final paragraph): the topic names cannot be taken from the contract package, so they are spelled
- * here. The contracts repository is not this repository's to change, and adding a topic to a
- * frozen contract package from a consumer is exactly the drift that package exists to prevent.
- *
- * What that costs: a consumer of `community.proposal.executed` has no versioned payload type to
- * compile against, so the wire shape below is a promise made in prose. It is kept deliberately
- * flat and additive, and `outbox.test.ts` pins it — a change to these payloads breaks a test in
- * this repository, which is the only gate available until the topic is registered.
- * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * The other eight are still named only here, and `topics.ts` is where that is now recorded — as a
+ * SELF-EMPTYING quarantine carrying the exact `TopicSpec` micro-contracts should paste, rather than
+ * as a paragraph that goes stale the moment somebody acts on it. This one did: it kept claiming the
+ * registry held no `community.*` topic for as long as it took a reader to check.
  *
  * Naming follows the estate's rule: `<service>.<aggregate>.<past-tense-verb>`, keyed by the
  * aggregate id so that ordering per `(topic, key)` means what a consumer expects.

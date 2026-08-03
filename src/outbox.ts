@@ -27,15 +27,39 @@
  * Writing the event in the same transaction as the execution is the only arrangement in which
  * neither is possible.
  *
- * **`community.proposal.executed` is not a registered topic.** `07-dependency-map.md:180` names
- * it and its three consumers; `contracts/packages/events/src/index.ts` registers no `community.*`
- * topic at all, though `community` IS a valid `ProducerService` there. So the topic string is
- * spelled in `events.ts` in this repository rather than taken from the contract package, exactly
- * as `micro-devplatform` had to do for `devplatform.*` (18-build-status.md §3.3h). Recorded, not
- * fixed — the contracts repository is not this repository's to change.
+ * ## The envelope is the contract's, and it did not used to be
+ *
+ * Three things this file sent were things no consumer in the estate could read, and each was
+ * silent because both sides tested against their own fake of the other:
+ *
+ *   - **The version.** The contract types `EventEnvelope.version` as `` `${number}.${number}` ``
+ *     — a "major.minor" STRING. This relay copied the stored INTEGER onto the wire, and
+ *     `validateEnvelope` refuses that with "version: missing". Every `community.*` event ever
+ *     relayed was refused at the envelope before anything looked at a payload.
+ *   - **The signature.** The contract signs `t=<seconds>,v1=<hmac over "<seconds>.<body>">` under
+ *     `cf-signature`; this file had its own `sha256=<hmac over body>` under
+ *     `x-cloudsforge-signature`. Five producers carried that drifted copy of the one value the
+ *     contracts package exists to be the single source of, and identity, market and trade have all
+ *     since deleted theirs (market 8f6b306). The timestamp inside the signed material is not
+ *     cosmetic: without it a captured delivery is a lasting credential.
+ *   - **`actor` and `correlationId`.** Both columns are nullable and both were copied straight
+ *     through. The contract refuses a null actor and a null correlation id outright. See
+ *     `buildEnvelope`.
+ *
+ * Three `community.*` topics ARE registered now — `community.proposal.executed`,
+ * `community.proposal.opened` and `community.vote.cast` (contracts 9b19dd1) — and `topics.ts` in
+ * this repository reconciles the emitted set against that registry in both directions, so a fourth
+ * cannot be adopted without a reader here seeing it.
  */
 
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import {
+  EVENT_ID_HEADER,
+  SIGNATURE_HEADER,
+  serviceActor,
+  signDelivery,
+  verifyDelivery,
+  type EventVersion,
+} from '@cloudsforge/contracts-events'
 import type { Sql, TransactionSql } from 'postgres'
 import { HttpClient } from '@cloudsforge/http'
 import type { Logger } from '@cloudsforge/telemetry'
@@ -56,16 +80,34 @@ export interface DomainEvent {
   readonly version?: number
 }
 
-/** The wire envelope. Additive-only, versioned per topic, schema-diff enforced — AD-02. */
+/**
+ * The wire version, in the CONTRACT's shape.
+ *
+ * The stored column stays an integer — storage records the major — and the mapping to the
+ * contract's shape happens here, at the wire, in one place. `EventVersion` is IMPORTED rather than
+ * restated: a local copy of a contract type is a copy that can drift, which is the whole reason
+ * this function exists.
+ */
+const wireVersion = (v: number): EventVersion => `${v}.0` as EventVersion
+
+/**
+ * The wire envelope. Additive-only, versioned per topic, schema-diff enforced — AD-02.
+ *
+ * **`actor` and `correlationId` are `string`, not `string | null`.** They used to be nullable here
+ * because the columns are nullable, and that was the integer version's defect wearing a third hat:
+ * `validateEnvelope` refuses a null actor ("actor: missing") and a null correlation id
+ * ("correlationId: missing; a cross-service investigation stops here"). A nullable column is a
+ * storage fact; the wire has no such freedom, and `buildEnvelope` is where the two meet.
+ */
 export interface EventEnvelope {
   readonly id: string
   readonly topic: string
   readonly key: string
   readonly occurredAt: string
   readonly producer: string
-  readonly version: number
-  readonly actor: string | null
-  readonly correlationId: string | null
+  readonly version: EventVersion
+  readonly actor: string
+  readonly correlationId: string
   readonly payload: Record<string, unknown>
 }
 
@@ -140,19 +182,30 @@ export async function emitOn(tx: Tx, producer: string, event: DomainEvent): Prom
 
 /* ------------------------------------------------------------------------ signing */
 
-export const SIGNATURE_HEADER = 'x-cloudsforge-signature'
+export { EVENT_ID_HEADER, SIGNATURE_HEADER }
 
-/** `sha256=<hex>` over the exact bytes sent, so a subscriber verifies before parsing. */
+/**
+ * THE CONTRACT SIGNS, NOT THIS FILE.
+ *
+ * This was a local implementation — `sha256=<hmac over the body>` under a locally-declared
+ * `x-cloudsforge-signature` — and four other producers carried the same copy. The contract signs
+ * `t=<seconds>,v1=<hmac over "<seconds>.<body>">` under `cf-signature`, and the consumers that
+ * import it (activity, notify) verify exactly that: every delivery from this service was refused,
+ * first as "signature: missing" and, had the header name been aligned alone, as
+ * "malformed_header".
+ *
+ * The exported names stay, so no call site changes; the implementations are the contract's, so
+ * they cannot drift again. The timestamp is inside the signed message rather than beside it, which
+ * is what makes the freshness window mean anything — without it a captured delivery is a lasting
+ * credential.
+ */
 export function signEvent(body: string, secret: string): string {
-  return `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`
+  return signDelivery(body, secret)
 }
 
-/** Timing-safe, because a byte-at-a-time comparison of a MAC is a byte-at-a-time forgery oracle. */
+/** Timing-safety and the freshness window both live in the contract's verifier. */
 export function verifyEventSignature(body: string, secret: string, presented: string): boolean {
-  const expected = Buffer.from(signEvent(body, secret))
-  const actual = Buffer.from(presented)
-  if (expected.length !== actual.length) return false
-  return timingSafeEqual(expected, actual)
+  return verifyDelivery(body, presented, secret).ok
 }
 
 /* ------------------------------------------------------------------------ relay */
@@ -182,6 +235,39 @@ interface OutboxRow {
 interface SubscriptionRow {
   readonly id: string
   readonly url: string
+}
+
+/**
+ * One outbox row → one wire envelope. **The only place an envelope is built.**
+ *
+ * Exported so `topics.test.ts` can hand the real thing to the contract's own `validateEnvelope`
+ * rather than to a copy. That distinction is the point: this service's suite was green while every
+ * event it emitted was refused, because both sides tested against imagined counterparts. A guard
+ * that builds its own envelope proves only that the guard can build an envelope.
+ *
+ * The two defaults are the contract's own semantics, not inventions:
+ *
+ *   - **`correlationId` falls back to the event id.** `makeEvent` does exactly this — "an event
+ *     that starts a story rather than continuing one is its own correlation root". A null here
+ *     would be refused outright, and refusing an event because nobody handed it a request id
+ *     would lose the event rather than the trace.
+ *   - **`actor` falls back to `service:community`.** This service's most important emit is the
+ *     scheduled transition at `jobs.ts:220`, which has NO user actor because nobody performed the
+ *     act — and `serviceActor` is precisely what the contract spells for that. `null` is not an
+ *     actor the contract has a word for.
+ */
+export function buildEnvelope(row: OutboxRow): EventEnvelope {
+  return {
+    id: row.id,
+    topic: row.topic,
+    key: row.key,
+    occurredAt: row.occurred_at.toISOString(),
+    producer: row.producer,
+    version: wireVersion(row.version),
+    actor: row.actor ?? serviceActor('community'),
+    correlationId: row.correlation_id ?? row.id,
+    payload: row.payload,
+  }
 }
 
 /**
@@ -225,17 +311,7 @@ export function createRelay(deps: RelayDeps): Handler {
         select id, url from event_subscriptions where topic = ${event.topic} and active = true
       `
 
-      const envelope: EventEnvelope = {
-        id: event.id,
-        topic: event.topic,
-        key: event.key,
-        occurredAt: event.occurred_at.toISOString(),
-        producer: event.producer,
-        version: event.version,
-        actor: event.actor,
-        correlationId: event.correlation_id,
-        payload: event.payload,
-      }
+      const envelope = buildEnvelope(event)
       // Signed over the exact bytes `HttpClient` will send: it stringifies the same object with
       // the same key order, so the MAC a subscriber recomputes over the received body matches.
       const signature = signEvent(JSON.stringify(envelope), deps.signingSecret)
@@ -305,7 +381,7 @@ async function deliver(
       // The event id is the idempotency key, which is what makes this POST safe to retry and is
       // the same value the subscriber dedupes on.
       idempotencyKey: envelope.id,
-      headers: { [SIGNATURE_HEADER]: signature, 'x-event-id': envelope.id },
+      headers: { [SIGNATURE_HEADER]: signature, [EVENT_ID_HEADER]: envelope.id },
       ...(envelope.correlationId ? { requestId: envelope.correlationId } : {}),
     })
     await deps.sql`
