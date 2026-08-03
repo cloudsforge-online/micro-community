@@ -34,6 +34,7 @@
 
 import { HttpClient, HttpError } from '@cloudsforge/http'
 import type { AccountSubject, Actor, LedgerAssetCode } from '@cloudsforge/contracts-money'
+import type { LiveScope } from '@cloudsforge/contracts-auth'
 
 /**
  * EXACT, and it is the only scope this service asks of the ledger.
@@ -41,8 +42,14 @@ import type { AccountSubject, Actor, LedgerAssetCode } from '@cloudsforge/contra
  * Not `ledger:*`. See `scopes.ts` for the estate's two scope matchers and why this repository
  * chose the strict one — a governance service that can be talked into a wildcard is a governance
  * service whose treasury can be spent by anything holding a broad token.
+ *
+ * `readonly LiveScope[]` rather than `readonly string[]`: see the header of `policyclient.ts`.
+ * This is an outbound demand, `derive-grants.mjs` reads it into the estate's grant list, and
+ * identity
+ * refuses to boot on a name the registry does not have — or has deprecated, which `Scope` alone
+ * would not have caught.
  */
-export const LEDGER_SCOPES: readonly string[] = Object.freeze(['ledger:post'])
+export const LEDGER_SCOPES: readonly LiveScope[] = Object.freeze(['ledger:post'])
 
 /**
  * The ledger refused on the state of the world — most often an insufficient treasury balance,

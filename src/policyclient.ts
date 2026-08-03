@@ -45,8 +45,43 @@
  */
 
 import { HttpClient, HttpError } from '@cloudsforge/http'
+import type { LiveScope } from '@cloudsforge/contracts-auth'
 
-export const POLICY_SCOPES: readonly string[] = Object.freeze(['policy:decide'])
+/**
+ * The scopes this service's token must carry to call this peer.
+ *
+ * ── THIS IS AN OUTBOUND DEMAND, AND THAT DIRECTION WAS UNCHECKED ─────────────────────────────
+ *
+ * `readonly LiveScope[]`, not `readonly string[]`. `micro-org`'s `service-ci.yml` proves that
+ * every scope a repository's route GATES demand is registered — the INBOUND direction. This
+ * constant is the other one: what this service PRESENTS to a peer. Nothing had ever checked it,
+ * which is how `micro-market` came to declare `policy:evaluate` and `micro-wallet`
+ * `custody:address` — neither of which has ever been a registry key — for the life of both
+ * services.
+ *
+ * The consequence is not a 403 on one call. `micro-deploy`'s `derive-grants.mjs` reads this
+ * constant into `IDENTITY_SERVICE_TOKEN_GRANTS`, and identity validates that list against the
+ * registry at import and REFUSES TO START on a name it does not know
+ * (`identity/src/env.ts:141`). An unregistered demand here is a dead identity container, and
+ * therefore no tokens for anybody.
+ *
+ * ── AND `LiveScope` RATHER THAN `Scope` ───────────────────────────────────────────────────────
+ *
+ * `Scope` is `keyof typeof SCOPES` — every registered key, DEPRECATED ones included. It would
+ * catch `policy:evaluate`, which is not a key, and wave through `wallet:provision`, which is.
+ * Identity will not mint a deprecated scope either, so that is the same failure by a quieter
+ * route: satisfies the compiler, dies at runtime.
+ *
+ * `LiveScope = Exclude<Scope, DeprecatedScope>`, and `DeprecatedScope` is computed FROM `SCOPES`
+ * by a conditional type over the `deprecated` field rather than hand-listed
+ * (`contracts/packages/auth/src/index.ts:507`), so it cannot drift from the registry — a
+ * hand-written companion list is the failure that package keeps catching.
+ *
+ * `Scope` deliberately keeps its wide meaning and this does not narrow it: a token arriving from
+ * anywhere may carry a scope that has since died, so reading is wide and demanding is narrow.
+ * This is the demanding direction.
+ */
+export const POLICY_SCOPES: readonly LiveScope[] = Object.freeze(['policy:decide'])
 
 /**
  * The action name, spelled as policy's closed registry spells it.
