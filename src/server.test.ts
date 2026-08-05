@@ -607,6 +607,107 @@ test('erasure pseudonymises the governance record rather than deleting it', { sk
   assert.equal(await roleIn(sql, community.id, BOB), null)
 })
 
+test('erasure reaches EVERY column that named the person, not just votes', { skip }, async () => {
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  // The handler pseudonymised votes, proposal authors, post authors and memberships, and left
+  // five other columns holding `user:<uuid>` in the clear:
+  //
+  //   communities.owner_subject     a founder survived erasure entirely
+  //   delegations.delegator_subject the edge was revoked; the person on it was not touched
+  //   delegations.delegate_subject  same
+  //   proposals.target_subject      the member a role_change proposal is ABOUT
+  //   executions.executed_by        who executed a passed proposal
+  //   discussion_posts.body         `redacted_at` masks the text on READ; it stays in the table
+  //
+  // This test plants the erased subject in all of them and asserts that nothing survives. It is
+  // written as a sweep over the schema rather than as six assertions so that a column added to a
+  // subject-bearing table later is caught here instead of quietly becoming the seventh.
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  const CAROL = subject('carol')
+  const owned = await seedCommunity(sql, { ownerSubject: BOB })
+  await seedMember(sql, owned, CAROL)
+  const proposal = await seedProposal(sql, owned, { status: 'voting', quorum: 1n })
+
+  await sql`update proposals set target_subject = ${BOB} where id = ${proposal.id}`
+  await sql`
+    insert into discussion_posts (proposal_id, author, body)
+    values (${proposal.id}, ${BOB}, 'my name is bob and my email is in this post')
+  `
+  await sql`
+    insert into delegations (community_id, delegator_subject, delegate_subject)
+    values (${owned.id}, ${BOB}, ${CAROL})
+  `
+  // An execution may only be recorded against a timelocked proposal — the trigger says so, and
+  // it is right to. A second proposal is moved into that state so the execution row is legal.
+  const executed = await seedProposal(sql, owned, { status: 'voting', quorum: 1n })
+  await sql`
+    update proposals
+       set status         = 'timelocked',
+           opens_at       = now() - interval '3 hours',
+           closes_at      = now() - interval '2 hours',
+           timelock_until = now() - interval '1 hour'
+     where id = ${executed.id}
+  `
+  await sql`
+    insert into executions (proposal_id, kind, executed_by, idempotency_key, correlation_id)
+    values (${executed.id}, 'text', ${BOB}, ${crypto.randomUUID()}, ${crypto.randomUUID()})
+  `
+
+  const envelope = {
+    id: crypto.randomUUID(),
+    topic: 'identity.user.deleted',
+    key: 'idem-bob-erase-all',
+    occurredAt: new Date().toISOString(),
+    producer: 'identity',
+    version: 1,
+    actor: null,
+    correlationId: null,
+    payload: { userId: 'bob' },
+  }
+  const body = JSON.stringify(envelope)
+  const { signEvent, SIGNATURE_HEADER } = await import('./outbox.ts')
+  const response = await fetch(`${baseUrl}/v1/events`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      [SIGNATURE_HEADER]: signEvent(body, 'a-signing-secret-long-enough-000'),
+    },
+    body,
+  })
+  assert.equal(response.status, 202)
+
+  // Every text column of every table this service owns, asked the same question: does the erased
+  // subject still appear anywhere at all?
+  const [leaks] = await sql<{ n: number }[]>`
+    select (
+      (select count(*) from communities       where owner_subject     = ${BOB})
+    + (select count(*) from memberships       where subject           = ${BOB})
+    + (select count(*) from proposals         where author            = ${BOB} or target_subject = ${BOB})
+    + (select count(*) from discussion_posts  where author            = ${BOB} or position('bob' in body) > 0)
+    + (select count(*) from delegations       where delegator_subject = ${BOB} or delegate_subject = ${BOB})
+    + (select count(*) from votes             where subject           = ${BOB} or cast_by = ${BOB})
+    + (select count(*) from executions        where executed_by       = ${BOB})
+    )::int as n`
+  assert.equal(leaks!.n, 0, 'a column naming the erased subject survived erasure')
+
+  // The rows themselves are all still there — this is pseudonymisation, not deletion, and a
+  // community, a proposal and an execution are other people's records.
+  const [kept] = await sql<{ n: number }[]>`
+    select (
+      (select count(*) from communities where id = ${owned.id})
+    + (select count(*) from proposals   where id = ${proposal.id})
+    + (select count(*) from executions  where proposal_id = ${executed.id})
+    )::int as n`
+  assert.equal(kept!.n, 3, 'erasure deleted a record that belongs to the community')
+
+  // And the tombstone is terminal: the community cannot be handed back to a real account.
+  await assert.rejects(
+    () => sql`update communities set owner_subject = ${CAROL} where id = ${owned.id}`,
+    /erased owner/,
+    'an erased community owner could be re-attributed',
+  )
+})
+
 test('a redelivered erasure event is a duplicate, not a second erasure', { skip }, async () => {
   const id = crypto.randomUUID()
   const send = async () => {

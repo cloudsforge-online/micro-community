@@ -1144,11 +1144,79 @@ function buildRoutes(): Route[] {
  * money has already moved, leaving an execution with no mandate behind it and no way to reconstruct
  * one.
  *
- * So: memberships and delegations are removed, discussion posts are redacted, and vote rows keep
- * their weight and their choice while the subject becomes an opaque token derived from nothing.
- * The arithmetic is unchanged; the person is no longer identifiable from it. `erased:<uuid>` is a
- * fresh random id rather than a hash of the user id, because a hash of a known-format identifier is
- * reversible by anybody who can enumerate user ids.
+ * So vote rows keep their weight and their choice while the subject becomes an opaque token derived
+ * from nothing. The arithmetic is unchanged; the person is no longer identifiable from it.
+ *
+ * **THE TOMBSTONE IS IRREVERSIBLE, AND THAT IS THE PROPERTY THE WHOLE DESIGN RESTS ON.**
+ * `user:erased-<uuid>` is `crypto.randomUUID()` — CSPRNG output, generated per erasure, written to
+ * the row and never stored anywhere alongside the subject it replaced. There is no mapping table,
+ * no reverse index and nothing to compromise: this is destruction of the link, not a lookup that
+ * somebody with enough access could run backwards. It is deliberately NOT a hash of the user id,
+ * because a hash of a known-format identifier is reversible by anybody who can enumerate user ids —
+ * and a uuid namespace is entirely enumerable given the pepper-free construction a hash would have.
+ * One fresh token per erasure, not one per row, so a person's rows still join to each other; that
+ * is what keeps a historical tally reconstructible without naming anyone.
+ *
+ * ── PER-TABLE DECISION ────────────────────────────────────────────────────────────────────────
+ *
+ * | table                     | action     | reasoning, and lawful basis where retained          |
+ * |---------------------------|------------|-----------------------------------------------------|
+ * | memberships               | delete     | The live authority record. It grants a capability   |
+ * |                           |            | and there is no reason to keep one for an account   |
+ * |                           |            | that no longer exists. Deleted outright.            |
+ * | votes.subject             | anonymise  | The tally must survive; the voter need not. See     |
+ * | votes.cast_by             |            | above, and `community_refuse_vote_update` in        |
+ * |                           |            | migrations, which permits exactly these two columns |
+ * |                           |            | to be rewritten and refuses choice/weight/proposal. |
+ * | proposals.author          | anonymise  | A proposal's text is the community's record; who    |
+ * |                           |            | tabled it is not needed to read it.                 |
+ * | proposals.target_subject  | anonymise  | A `role_change` proposal names the member it is     |
+ * |                           |            | about. That is the erased person, in a column no    |
+ * |                           |            | shape CHECK covers, and it was being left behind.   |
+ * | discussion_posts.author   | anonymise  | Same as proposals.author.                           |
+ * | discussion_posts.body     | anonymise  | **The body was being kept.** `redacted_at` only     |
+ * |                           |            | masks it on READ (`proposals.ts:444`); the text the |
+ * |                           |            | person wrote — which is free-form and routinely     |
+ * |                           |            | contains their own personal data — stayed in the    |
+ * |                           |            | table. Redaction-on-read is a display rule, not     |
+ * |                           |            | erasure. The body is now overwritten.               |
+ * | delegations.*_subject     | anonymise  | **Both subject columns were being kept.** The       |
+ * |                           |            | handler set `revoked_at` and nothing else, so every |
+ * |                           |            | delegation the person made or received still named  |
+ * |                           |            | them in the clear. Revoking an edge is not erasing  |
+ * |                           |            | the person on it.                                   |
+ * | communities.owner_subject | anonymise  | **Was being kept.** A community founder's           |
+ * |                           |            | `user:<uuid>` survived erasure entirely. The        |
+ * |                           |            | community itself is other members' and stays.       |
+ * | executions.executed_by    | anonymise  | **Was being kept.** What the row exists to prove is |
+ * |                           |            | "this proposal executed exactly once, and here is   |
+ * |                           |            | the ledger entry" — the uniqueness constraint, the  |
+ * |                           |            | idempotency key and `ledger_entry_id` all survive   |
+ * |                           |            | untouched. None of that needs the person, and the   |
+ * |                           |            | durable accountability record is admin-api's        |
+ * |                           |            | hash-chained audit, not this column.                |
+ * | proposals.spend_recipient | RETAIN     | A community voted to pay this person and a ledger   |
+ * |                           |            | entry was posted against it. Art. 17(3)(b) — the    |
+ * |                           |            | accounting record — and 17(3)(e), establishment and |
+ * |                           |            | defence of legal claims: it is the mandate for a    |
+ * |                           |            | movement of money and rewriting it would leave a    |
+ * |                           |            | posted entry with no authority behind it. Erasing   |
+ * |                           |            | it here would also achieve nothing, because         |
+ * |                           |            | `micro-ledger` holds the authoritative copy of the  |
+ * |                           |            | same subject and is the service that must decide    |
+ * |                           |            | its retention. Reported, not silently kept.         |
+ * | treasury_accounts         | retain     | `ledger_subject` is `community:<id>`, derived by a  |
+ * |                           |            | generated column. It names no person.               |
+ * | community_roles           | retain     | Capability sets, no subject column.                 |
+ * | inbox / outbox            | retain     | The inbox row IS the acknowledgement, and Art. 5(2) |
+ * |                           |            | requires us to be able to demonstrate compliance.   |
+ * |                           |            | It names an event, not a user. No event is emitted  |
+ * |                           |            | for the erasure itself — announcing it would write  |
+ * |                           |            | a fresh row about the person to every subscriber.   |
+ * ──────────────────────────────────────────────────────────────────────────────────────────────
+ *
+ * `communities_erased_owner_is_final` (migration 9) makes the tombstone structural: a row carrying
+ * an `erased-` owner may not be rewritten to name a real account again.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 async function eraseSubject(tx: Tx, subject: string): Promise<Record<string, number>> {
@@ -1158,23 +1226,51 @@ async function eraseSubject(tx: Tx, subject: string): Promise<Record<string, num
     update votes set subject = ${tombstone} where subject = ${subject} returning id
   `
   await tx`update votes set cast_by = ${tombstone} where cast_by = ${subject}`
+
+  // The BODY, not just the flag. `redacted_at` masks the text on read; it does not remove it, and
+  // a post is free-form text the person wrote about themselves.
   const posts = await tx`
-    update discussion_posts set author = ${tombstone}, redacted_at = coalesce(redacted_at, now())
+    update discussion_posts
+       set author      = ${tombstone},
+           body        = '[erased]',
+           redacted_at = coalesce(redacted_at, now())
      where author = ${subject} returning id
   `
+
+  // Revoked AND anonymised. `delegations_not_self` is safe here because it already refuses a row
+  // whose two subjects are equal, so this person is on at most one side of any given row and the
+  // two CASE arms can never both fire. `community_refuse_delegation_cycle` returns early on a row
+  // with `revoked_at` set, so rewriting the subjects cannot trip the cycle walk.
   const delegations = await tx`
-    update delegations set revoked_at = coalesce(revoked_at, now())
+    update delegations
+       set revoked_at        = coalesce(revoked_at, now()),
+           delegator_subject = case when delegator_subject = ${subject} then ${tombstone} else delegator_subject end,
+           delegate_subject  = case when delegate_subject  = ${subject} then ${tombstone} else delegate_subject  end
      where delegator_subject = ${subject} or delegate_subject = ${subject}
     returning id
   `
+
   const memberships = await tx`delete from memberships where subject = ${subject} returning id`
+
   await tx`update proposals set author = ${tombstone} where author = ${subject}`
+  const targeted = await tx`
+    update proposals set target_subject = ${tombstone} where target_subject = ${subject} returning id
+  `
+  const owned = await tx`
+    update communities set owner_subject = ${tombstone} where owner_subject = ${subject} returning id
+  `
+  const executions = await tx`
+    update executions set executed_by = ${tombstone} where executed_by = ${subject} returning id
+  `
 
   return {
     votesPseudonymised: votes.length,
     postsRedacted: posts.length,
     delegationsRevoked: delegations.length,
     membershipsRemoved: memberships.length,
+    proposalsRetargeted: targeted.length,
+    communitiesReowned: owned.length,
+    executionsAnonymised: executions.length,
   }
 }
 

@@ -839,6 +839,63 @@ export const MIGRATIONS: readonly Migration[] = [
       create index if not exists idempotency_keys_created_idx on idempotency_keys (created_at);
     `,
   },
+
+  {
+    version: 9,
+    name: 'erasure-is-not-reversible',
+    up: `
+      -- ════════════════════════════════════════════════════════════════════════════════════════
+      -- A PSEUDONYMISED SUBJECT MAY NOT BE TURNED BACK INTO A REAL ONE.
+      --
+      -- \`eraseSubject\` writes \`user:erased-<uuid>\` over every subject column that named the
+      -- person. The token is CSPRNG output that is stored nowhere but on the row, so there is no
+      -- mapping to compromise — the reverse direction is closed by construction.
+      --
+      -- What is NOT closed by construction is a later write. Nothing above stops a route, a repair
+      -- script or a restore from setting \`owner_subject\` back to a real \`user:<uuid>\` on a row
+      -- that has been erased, and that would re-attribute a community to a person who asked to be
+      -- forgotten — without anything looking wrong, because the value written is perfectly valid.
+      --
+      -- So an erased owner is terminal. The rule is one-directional on purpose: it says an erased
+      -- row may not stop being erased, and says nothing about which rows must be erased, because
+      -- the overwhelming majority never will be.
+      --
+      -- \`communities\` is the table this is worth spending a trigger on: it is the only one where
+      -- the subject column is a LIVE authority (the owner is a capability holder, checked on
+      -- requests) rather than a historical record. Votes and proposals are already immutable in
+      -- the directions that matter — \`community_refuse_vote_update\` permits only \`subject\` and
+      -- \`cast_by\` to move, and it permits them precisely so erasure can run.
+      -- ════════════════════════════════════════════════════════════════════════════════════════
+      create or replace function community_refuse_owner_reattribution() returns trigger
+        language plpgsql
+      as $$
+      begin
+        if old.owner_subject like 'user:erased-%'
+           and new.owner_subject is distinct from old.owner_subject then
+          raise exception
+            'community % has an erased owner; it may not be re-attributed to %',
+            old.id, new.owner_subject
+            using errcode = 'check_violation';
+        end if;
+        return new;
+      end;
+      $$;
+
+      drop trigger if exists communities_erased_owner_is_final on communities;
+      create trigger communities_erased_owner_is_final
+        before update on communities
+        for each row execute function community_refuse_owner_reattribution();
+
+      -- Erasure looks rows up by subject on four columns that had no index for it. Without these
+      -- every erasure is a sequential scan of the delegation and execution tables; the memberships
+      -- and votes paths already had one.
+      create index if not exists proposals_target_subject_idx on proposals (target_subject)
+        where target_subject is not null;
+      create index if not exists communities_owner_idx on communities (owner_subject);
+      create index if not exists executions_executed_by_idx on executions (executed_by);
+      create index if not exists delegations_delegator_idx on delegations (delegator_subject);
+    `,
+  },
 ]
 
 /** Every table this service owns. The truncate list for the test harness, and nothing else. */
