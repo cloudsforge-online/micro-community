@@ -34,7 +34,11 @@
  */
 
 import { hostname } from 'node:os'
-import { assertGeneratedSecret, assertGeneratedSecretList } from '@cloudsforge/secrets'
+import {
+  assertGeneratedSecret,
+  assertGeneratedSecretList,
+  assertServiceCredential,
+} from '@cloudsforge/secrets'
 
 /**
  * The service's own name. A constant rather than a variable: it is a property of the repository,
@@ -51,18 +55,6 @@ export class EnvError extends Error {
   }
 }
 
-const PLACEHOLDERS = new Set([
-  'changeme',
-  'change-me',
-  'change_me',
-  'placeholder',
-  'secret',
-  'token',
-  'dev-secret',
-  'replace-with-a-real-secret',
-  'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-])
-
 type Source = Readonly<Record<string, string | undefined>>
 
 function required(source: Source, name: string): string {
@@ -71,16 +63,52 @@ function required(source: Source, name: string): string {
   return value
 }
 
-function requiredSecret(source: Source, name: string, minLength = 24): string {
-  const value = required(source, name)
-  if (PLACEHOLDERS.has(value.toLowerCase())) {
-    throw new EnvError(`${name} is set to a known placeholder — generate a real secret`)
-  }
-  // Length is a proxy for entropy and the only one available here. Set above the point at which a
-  // human-chosen string is plausible, so a memorable password fails this check too.
-  if (value.length < minLength) {
-    throw new EnvError(`${name} must be at least ${minLength} characters (got ${value.length})`)
-  }
+/**
+ * A SERVICE CREDENTIAL that may be absent, but must be real if present.
+ *
+ * ── WHAT THIS REPLACED, AND WHY THE OLD GUARD WAS DEFENDING THE DEFECT ─────────────────────────
+ *
+ * `COMMUNITY_SERVICE_CREDENTIAL` used to be read by a local `requiredSecret` — a deny-list of nine
+ * exact strings plus a 24-character floor. Measured on the live estate on 2026-08-05, the value it
+ * was letting through was a JWT that had been **expired for 26 hours** on a container reporting
+ * healthy, because `/livez` never presents it to anybody. That guard was not merely weak, it was
+ * defending the defect: a service token is `ey…` + several hundred characters, so it cleared the
+ * floor comfortably and appeared on no list (micro-org #222, and the cliff itself #197).
+ *
+ * `assertServiceCredential` refuses a JWT **by name**, which is what closes #222 for this variable:
+ * the value that was deployed now fails at boot with a line naming the ten-minute life, instead of
+ * working for ten minutes and then refusing every treasury spend for ever.
+ *
+ * ── ABSENCE IS A SUPPORTED MODE, AND `null` IS HOW IT IS SAID ──────────────────────────────────
+ *
+ * `null` rather than `undefined`, and rather than `''`: an empty string is falsy where a caller
+ * tests for it and truthy in `Object.keys`, so a mode chosen by `env.x ? … : …` would silently
+ * agree with an operator who set the variable to nothing. `null` is the absence, said once.
+ *
+ * The empty check stays AHEAD of the assertion, because compose interpolates
+ * `${COMMUNITY_IDENTITY_CREDENTIAL:-}` and an unset credential arrives as the EMPTY STRING. That is
+ * a supported mode, not a malformed one — and `migrator.ts` shares this environment while dialling
+ * nobody at all, so turning it into `exit(1)` would fail `community-migrate`, which the whole
+ * estate waits on through `service_completed_successfully`.
+ *
+ * ── WHY NOT `assertGeneratedSecret`, WHICH GUARDS THE OUTBOX KEYS ABOVE ────────────────────────
+ *
+ * Because it would refuse every credential identity has ever minted, and community would exit 1 at
+ * boot on BOTH networks. A credential is `cfsc_` + base64url, which is neither wholly base64 nor
+ * wholly hex — the underscore in its own prefix disqualifies it. And measured live: **the testnet
+ * credential CONTAINS A HYPHEN while the mainnet one does not**, so the "no hyphens" instinct that
+ * is exactly right for `OUTBOX_SIGNING_SECRET` would have booted mainnet and killed testnet. The
+ * fixture in `env.test.ts` is hyphenated on purpose so that mistake fails CI rather than one estate.
+ *
+ * It throws `SecretError` rather than `EnvError`, deliberately and for the same reason
+ * `requiredSigningSecret` does: the class says a value failed the SHAPE check rather than this
+ * file's own parsing, and `fatalConfig` reads `err.message` off `unknown` so the boot line is
+ * identical either way.
+ */
+function optionalCredential(source: Source, name: string): string | null {
+  const value = source[name]?.trim()
+  if (!value) return null
+  assertServiceCredential(name, value)
   return value
 }
 
@@ -98,14 +126,15 @@ function requiredSecret(source: Source, name: string, minLength = 24): string {
  * keystrokes, and a measured Shannon entropy floor. It has no NODE_ENV exemption and no escape
  * hatch, so CI generates a real value per run rather than being let through.
  *
- * `required` rather than `requiredSecret`, deliberately: the weaker checks are a strict subset of
- * the stronger ones, and running them first would answer a 40-character placeholder with "must be
+ * `required` alone in front of it, deliberately: the old local `requiredSecret` was a strict subset
+ * of this shape check, and running it first would answer a 40-character placeholder with "must be
  * at least 24 characters" — a message that is true, useless, and points the operator at the wrong
- * property.
+ * property. That helper is gone from this file entirely; the last variable holding it up,
+ * `COMMUNITY_SERVICE_CREDENTIAL`, was the one whose live value it was letting through (#222).
  *
- * **It is for the outbox key family and nothing else.** `COMMUNITY_SERVICE_CREDENTIAL` stays on
- * `requiredSecret`: it is issued by identity in its own format, not generated with `openssl`, and
- * demanding base64 of it would refuse the correct value.
+ * **It is for the outbox key family and nothing else.** The two credential variables go to
+ * `optionalCredential` above: they are issued by identity in its own format, not generated with
+ * `openssl`, and demanding base64 of them would refuse the correct value on both networks.
  *
  * It throws `SecretError` rather than `EnvError`, which is deliberate — the class is distinct so a
  * configuration failure can be told from every other kind, and `fatalConfig` below reads
@@ -178,6 +207,22 @@ export interface Env {
   readonly databasePoolMax: number
   readonly identityJwksUrl: string
   readonly identityIssuer: string
+  /**
+   * Where identity is, for `POST /service-tokens/exchange` — the ORIGIN, not the JWKS path.
+   *
+   * DERIVED from `IDENTITY_ISSUER` rather than demanded as a fourth identity variable, and the
+   * reasoning is not convenience: the issuer of a token is by definition where that token came
+   * from, so deriving keeps the two in step. A deployment that exchanged a credential against one
+   * identity while trusting the JWKS of another would fail with a signature error nobody would ever
+   * read as a configuration mistake. It also means this fix needs no new line in any deploy
+   * manifest — `IDENTITY_ISSUER` is already set everywhere community runs.
+   *
+   * `IDENTITY_URL` overrides it for the one deployment where the two genuinely differ: an issuer
+   * published under a public name and dialled internally. Same spelling and same default as
+   * `ledger/src/env.ts:476`, `market/src/env.ts:407` and `foresight/src/env.ts:571`, because a
+   * variable that means the same thing in four services must not be spelled four ways.
+   */
+  readonly identityUrl: string
   readonly instanceId: string
 
   /** Secrets accepted on `POST /v1/events`, the internal inbox. */
@@ -211,15 +256,55 @@ export interface Env {
   readonly indexerDeadlineMs: number
 
   /**
-   * The service token this process presents to the ledger, policy and the indexer.
+   * **The long-lived credential this process exchanges for a live service token.**
+   *
+   * This is the fix for micro-org #222. `COMMUNITY_SERVICE_CREDENTIAL` below held a **token**, and a
+   * token minted by identity lives 600 seconds (`identity/src/tokens.ts:33`). `index.ts:131` read it
+   * once at import — `const token = () => env.serviceCredential` — and handed that one string to the
+   * ledger, to policy and to the indexer oracle, so this service authenticated once per bootstrap
+   * and never again while the container ran for days.
+   *
+   * The consequence here is worse than a failed call, and worse than in market where the same seam
+   * was fixed first. A 401 from policy is a 4xx, so `policyclient.ts:192-197` reads it as policy
+   * DECIDING and returns `{decision: 'deny', reasons: ['policy_401']}`; `executions.ts:290` turns
+   * that into `SpendRefusedError`; and `jobs.ts:353-357` **swallows** a refusal, because a refusal is
+   * an answer and retrying it would turn one decision into eight. So a dead credential does not
+   * stall a treasury spend — it **permanently refuses every one of them**, records the refusal
+   * against the community, and completes the job. A community's passed vote is answered "policy said
+   * no" when policy was never asked.
+   *
+   * `@cloudsforge/auth`'s `ServiceTokenProvider` exchanges this at `POST /service-tokens/exchange`
+   * (`identity/src/server.ts:1615`) for a 600-second token and refreshes at a jittered 80% of its
+   * life on traffic. The exchange consumes nothing, so N replicas boot from one credential and a
+   * restart days later still works. **The 600 seconds is deliberately unchanged**: rotation IS
+   * expiry, and a longer TTL is the same defect arriving later and hurting more.
+   *
+   * `null` is a supported mode — see `optionalCredential`. `index.ts` says at `fatal` what will
+   * break when it is.
+   */
+  readonly identityCredential: string | null
+
+  /**
+   * The pre-minted service token this process used to present to the ledger, policy and the indexer.
+   *
+   * **VESTIGIAL, AND IT HAS A STATED END.** It exists only so a container that is redeployed with
+   * the new image before its environment gains `COMMUNITY_IDENTITY_CREDENTIAL` starts in `static`
+   * mode — degraded, loudly, and identically to how it behaved before — rather than refusing to
+   * boot. `identityCredential` always wins when both are set (`upstreams.ts`), which is the state
+   * the estate will actually be in during the rollout.
+   *
+   * It is removed from this file once `COMMUNITY_IDENTITY_CREDENTIAL` is set in the estate compose
+   * and the release overlay, and `index.ts` logs `fatal` for exactly as long as it is being used.
+   * The same variable in market and foresight carries the same note and the same end.
    *
    * Named `..._SERVICE_CREDENTIAL` rather than `..._SERVICE_TOKEN` for the reason recorded in
    * 18-build-status: the estate's `secret-hygiene` check reads any `*TOKEN*` variable carrying a
    * value as a credential somebody pasted in and forgot. That check is right — a value that does
-   * not say it is fake should be treated as real. `micro-devplatform` renamed a variable rather
-   * than relax the guard, and so does this one. It is still a secret and is still validated as one.
+   * not say it is fake should be treated as real. The NAME was never the problem; what it held was.
+   * It now faces `assertServiceCredential`, so the JWT that was actually deployed under it is
+   * refused at boot rather than accepted and used until minute ten.
    */
-  readonly serviceCredential: string
+  readonly serviceCredential: string | null
 
   /** How often a token-gated membership is re-checked, and how many per pass. */
   readonly gateRecheckIntervalHours: number
@@ -253,6 +338,7 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     databasePoolMax: integer(source, 'COMMUNITY_DATABASE_POOL_MAX', 10, 1, 100),
     identityJwksUrl: required(source, 'IDENTITY_JWKS_URL'),
     identityIssuer: required(source, 'IDENTITY_ISSUER'),
+    identityUrl: optional(source, 'IDENTITY_URL', required(source, 'IDENTITY_ISSUER')),
     instanceId: optional(source, 'INSTANCE_ID', host || 'unknown'),
 
     ingestSecrets: parseSecretList(required(source, 'COMMUNITY_INGEST_SECRETS'), 'COMMUNITY_INGEST_SECRETS'),
@@ -268,7 +354,8 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     indexerNetwork: optional(source, 'INDEXER_NETWORK', 'mainnet'),
     indexerDeadlineMs: integer(source, 'INDEXER_DEADLINE_MS', 5_000, 100, 60_000),
 
-    serviceCredential: requiredSecret(source, 'COMMUNITY_SERVICE_CREDENTIAL'),
+    identityCredential: optionalCredential(source, 'COMMUNITY_IDENTITY_CREDENTIAL'),
+    serviceCredential: optionalCredential(source, 'COMMUNITY_SERVICE_CREDENTIAL'),
 
     gateRecheckIntervalHours: integer(source, 'COMMUNITY_GATE_RECHECK_INTERVAL_HOURS', 6, 1, 720),
     gateRecheckBatchSize: integer(source, 'COMMUNITY_GATE_RECHECK_BATCH_SIZE', 100, 1, 5_000),

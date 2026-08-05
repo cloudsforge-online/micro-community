@@ -53,8 +53,27 @@ jobs:
       # Each line gets its OWN value, which is what keeps proving the ingest list and the signing
       # scalar are separate variables rather than one read twice.
       #
-      # COMMUNITY_SERVICE_CREDENTIAL is deliberately NOT `@generate`: it is not part of the outbox
-      # key family, it is validated by the weaker `requiredSecret`, and it stays a throwaway.
+      # COMMUNITY_IDENTITY_CREDENTIAL IS `@credential`, AND THE VALUE IT REPLACED IS WHY.
+      # `COMMUNITY_SERVICE_CREDENTIAL=ci-only-not-a-real-secret-22222222` was justified here as "not
+      # part of the outbox key family, validated by the weaker `requiredSecret`, and a throwaway".
+      # That weaker guard — a deny-list of nine exact strings plus a 24-character floor — is the one
+      # that let a JWT expired for 26 HOURS sit in that variable on a healthy live container
+      # (micro-org #222). A CI value chosen to clear a guard is a CI value that stops the guard ever
+      # being tested, which is the same shape as micro-org #142.
+      #
+      # `@credential` (service-ci.yml:1276-1293) mints `cfsc_` + 43 base64url characters per run and
+      # throws it away, so CI holds a real credential rather than a string claiming to be one — and
+      # because base64url includes `-` and `_`, runs exercise BOTH the hyphenated shape (testnet's)
+      # and the alphanumeric one (mainnet's), which is the asymmetry that would otherwise boot one
+      # estate and kill the other.
+      #
+      # COMMUNITY_SERVICE_CREDENTIAL is GONE from this block and must not come back. `env.ts` now
+      # holds it to the same shape check, absence is a supported mode, and absence is the honest
+      # thing to exercise: it is vestigial and is deleted once no deployment sets it.
+      #
+      # IDENTITY_URL is not here either, and does not need to be: it defaults to IDENTITY_ISSUER,
+      # which is set below. That default is what lets this fix reach the estate without a new line
+      # in any deploy manifest.
       #
       # Note what is NOT here, and cannot be: there is no variable that shortens or bypasses a
       # timelock, so there is nothing CI could set to make the smoke test's life easier at the cost
@@ -69,7 +88,7 @@ jobs:
         POLICY_BASE_URL=http://127.0.0.1:4003
         COMMUNITY_INGEST_SECRETS=@generate
         OUTBOX_SIGNING_SECRET=@generate
-        COMMUNITY_SERVICE_CREDENTIAL=ci-only-not-a-real-secret-22222222
+        COMMUNITY_IDENTITY_CREDENTIAL=@credential
     secrets:
       # @cloudsforge/* is resolved by link:../runtime and link:../contracts, so CI checks out
       # micro-runtime and micro-contracts as siblings — both private, so the workflow needs a

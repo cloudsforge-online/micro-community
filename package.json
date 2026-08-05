@@ -1,12 +1,14 @@
 {
   "name": "@cloudsforge/community",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Communities and governance. Communities, membership, roles, treasury accounts, proposals, discussion, votes, delegations, timelocks and executions. A governance system moves money by vote, so this service holds no money — a treasury account is a micro-ledger account and a spend is a ledger entry — a member's voting power is counted exactly once by a unique constraint, a delegation cycle is refused by a trigger, a timelock is enforced by the database rather than by a handler, and a passed proposal executes exactly once under a lease keyed on the proposal.",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node --import tsx src/index.ts",
     "migrate": "node --import tsx src/migrator.ts",
@@ -43,6 +45,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "jose": "^5.10.0",
     "typescript": "^5.7.2"
   }
 }

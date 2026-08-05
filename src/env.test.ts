@@ -32,6 +32,34 @@ function generated(): string {
 }
 
 /**
+ * A service credential, and **THIS FIXTURE CONTAINS HYPHENS ON PURPOSE** — that is the most
+ * important thing about it. Fabricated: identity's shape, none of its entropy, and never a value out
+ * of `deploy/compose/estate/tokens.env`.
+ *
+ * A credential body is base64**url**, so `-` and `_` are in its alphabet. Measured live on both
+ * estates: the mainnet credential is alphanumeric and the testnet one CONTAINS A HYPHEN. So a
+ * "secrets have no hyphens" rule — which is exactly right for `OUTBOX_SIGNING_SECRET` below, and
+ * which every placeholder this estate ever wrote would have failed — passes mainnet and kills
+ * testnet at boot. Keeping a hyphenated credential here means that mistake fails CI instead of
+ * failing one estate in production. Do not "tidy" the hyphens out of this value.
+ * (`admin-api/src/env.test.ts:14-22` carries the same fixture for the same reason.)
+ */
+const CREDENTIAL = 'cfsc_TToR-eOeVTDnqhX1-nu6-u7DoCr4MCfa86g4g6kd404'
+
+/**
+ * A well-formed 600-second SERVICE TOKEN. Not a credential, and the difference is micro-org #222.
+ *
+ * Header and payload are real base64url JSON; the signature is fabricated, because nothing here
+ * verifies it — `assertServiceCredential` refuses this on SHAPE, at boot, before anything could.
+ * This is the family of value that `COMMUNITY_SERVICE_CREDENTIAL` actually held on the live estate,
+ * where it had been expired for 26 hours on a container reporting healthy.
+ */
+const STATIC_TOKEN =
+  'eyJhbGciOiJSUzI1NiIsImtpZCI6ImsxIn0.' +
+  'eyJzdWIiOiJzZXJ2aWNlOmNvbW11bml0eSIsInR5cCI6InNlcnZpY2UiLCJleHAiOjE3NTQ0MDAwMDB9.' +
+  'c2lnbmF0dXJlLXdoaWNoLW5vdGhpbmctaGVyZS12ZXJpZmllcw'
+
+/**
  * A configuration that boots. Every test starts from this and removes or corrupts one field.
  *
  * The two outbox-family values are GENERATED rather than written. They used to be `'a'.repeat(32)`
@@ -40,9 +68,13 @@ function generated(): string {
  * compose file and passed every guard in the estate (micro-org #142). A fixture exempt from the
  * rule it exercises is how that survived every test in the estate.
  *
- * `COMMUNITY_SERVICE_CREDENTIAL` stays a written fixture on purpose: it is NOT part of the outbox
- * key family, it is issued by identity in its own format rather than generated with `openssl`, and
- * it is still validated by the weaker `requiredSecret`.
+ * **NEITHER CREDENTIAL IS IN HERE, AND THAT IS THE POINT OF THE FIX.** `base()` is the set of
+ * variables without which this service refuses to start, and the credential is no longer one of
+ * them: absence is a supported mode (`migrator.ts` shares this environment and dials nobody, and
+ * compose interpolates an unset `${COMMUNITY_IDENTITY_CREDENTIAL:-}` to the empty string). The old
+ * fixture here was `'cccccccccccccccccccccccccccccccc'` — 32 characters of one letter, past the
+ * 24-character floor, on no deny-list. It was the shape of the guard it was exercising, and that
+ * guard was the one letting a dead JWT into three upstream clients.
  */
 function base(): Record<string, string> {
   return {
@@ -53,7 +85,6 @@ function base(): Record<string, string> {
     OUTBOX_SIGNING_SECRET: generated(),
     LEDGER_BASE_URL: 'http://ledger:4000',
     POLICY_BASE_URL: 'http://policy:4000',
-    COMMUNITY_SERVICE_CREDENTIAL: 'cccccccccccccccccccccccccccccccc',
   }
 }
 
@@ -168,17 +199,19 @@ test('CHANGE_ME does not boot', () => {
   // A default secret in source is not convenient, it is catastrophic, and a placeholder that boots
   // is a placeholder that reaches production.
   //
-  // `COMMUNITY_SERVICE_CREDENTIAL` is the one still held by `requiredSecret`, so it is the one that
-  // still raises this file's own `EnvError`. It is not part of the outbox key family: identity
-  // issues it in its own format rather than `openssl` generating it, and demanding base64 of it
-  // would refuse the correct value.
-  assert.throws(() => loadEnv({ ...base(), COMMUNITY_SERVICE_CREDENTIAL: 'CHANGE_ME' }), EnvError)
-  assert.throws(() => loadEnv({ ...base(), COMMUNITY_SERVICE_CREDENTIAL: 'changeme' }), EnvError)
-  assert.throws(() => loadEnv({ ...base(), COMMUNITY_SERVICE_CREDENTIAL: 'short' }), EnvError)
+  // Every one of these now raises `SecretError` rather than this file's own `EnvError`, and the
+  // class is distinct on purpose: it says a value failed the SHAPE check rather than this file's
+  // parsing. `fatalConfig` reads `err.message` off `unknown`, so the boot line an operator sees is
+  // identical either way.
+  for (const name of ['COMMUNITY_IDENTITY_CREDENTIAL', 'COMMUNITY_SERVICE_CREDENTIAL']) {
+    assert.throws(() => loadEnv({ ...base(), [name]: 'CHANGE_ME' }), SecretError)
+    assert.throws(() => loadEnv({ ...base(), [name]: 'changeme' }), SecretError)
+    assert.throws(() => loadEnv({ ...base(), [name]: 'short' }), SecretError)
+    // And the prefix alone is not a credential: `cfsc_` on a placeholder body is refused too, which
+    // is the hole a CI workflow in this estate was once written against.
+    assert.throws(() => loadEnv({ ...base(), [name]: 'cfsc_ci-only-not-a-real-credential' }), SecretError)
+  }
 
-  // The outbox key family raises `SecretError` instead, and the class is distinct on purpose: it
-  // says a value failed the SHAPE check rather than this file's own parsing. `fatalConfig` reads
-  // `err.message` off `unknown`, so the boot line an operator sees is identical either way.
   for (const name of ['OUTBOX_SIGNING_SECRET', 'COMMUNITY_INGEST_SECRETS']) {
     assert.throws(() => loadEnv({ ...base(), [name]: 'CHANGE_ME' }), SecretError)
     assert.throws(() => loadEnv({ ...base(), [name]: 'changeme' }), SecretError)
@@ -193,8 +226,84 @@ test('.env.example ships CHANGE_ME placeholders and no real values', () => {
     if (!match) continue
     const [, name = '', value = ''] = match
     if (!/SECRET|CREDENTIAL/.test(name)) continue
+    // EMPTY is allowed, and only for a variable whose absence is a supported mode. The property this
+    // test defends is "no real value is committed here", and an empty string cannot be one; a
+    // `CHANGE_ME` on a variable an operator is meant to LEAVE UNSET would be an instruction to set
+    // it, which is how a vestigial variable outlives the thing it was a bridge to.
+    if (value === '') continue
     assert.match(value, /CHANGE_ME/, `${name} in .env.example does not look like a placeholder`)
   }
+})
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * micro-org #222. THE TEN-MINUTE CLIFF, refused at boot rather than discovered at minute ten.
+ * ──────────────────────────────────────────────────────────────────────────────────────────────── */
+
+test('A SERVICE TOKEN PASTED INTO EITHER CREDENTIAL IS REFUSED BY NAME', () => {
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  // This is the whole of #222 for this file. The value that was live in
+  // `COMMUNITY_SERVICE_CREDENTIAL` on 2026-08-05 was a JWT that had been expired for 26 hours, on a
+  // container reporting healthy — and the guard it faced was a deny-list of nine exact strings plus
+  // a 24-character floor, which a several-hundred-character `ey…` clears without effort.
+  //
+  // A token cannot renew itself. Ten minutes after the boot that read it, policy answers 401,
+  // `policyclient.ts:192-197` reads that 4xx as policy DECIDING, and every treasury spend comes back
+  // `deny`/`policy_401` — swallowed by `jobs.ts:353-357` as an answer. So the refusal must happen
+  // HERE, at boot, with the variable named.
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  for (const name of ['COMMUNITY_IDENTITY_CREDENTIAL', 'COMMUNITY_SERVICE_CREDENTIAL']) {
+    assert.throws(
+      () => loadEnv({ ...base(), [name]: STATIC_TOKEN }),
+      (err: unknown) => {
+        const message = (err as Error).message
+        assert.ok(err instanceof SecretError)
+        assert.match(message, new RegExp(name), 'the refusal does not name the variable')
+        assert.match(message, /TOKEN, not a credential/, 'the refusal does not name the confusion')
+        assert.match(message, /ten-minute/, 'the refusal does not name the ten-minute life')
+        assert.ok(!message.includes(STATIC_TOKEN), 'the refusal echoed the value')
+        return true
+      },
+      `${name} accepted a JWT — this is the defect, not a regression of it`,
+    )
+  }
+})
+
+test('a real credential is accepted, hyphens and all, in either variable', () => {
+  // A guard that occasionally refuses correct input is a guard an operator deletes at 3am. The
+  // hyphens in `CREDENTIAL` are the case that matters: see its docblock.
+  const env = loadEnv({
+    ...base(),
+    COMMUNITY_IDENTITY_CREDENTIAL: CREDENTIAL,
+    COMMUNITY_SERVICE_CREDENTIAL: CREDENTIAL,
+  })
+  assert.equal(env.identityCredential, CREDENTIAL)
+  assert.equal(env.serviceCredential, CREDENTIAL)
+})
+
+test('an absent credential is null, and an EMPTY one is null too', () => {
+  // `COMMUNITY_IDENTITY_CREDENTIAL: ${COMMUNITY_IDENTITY_CREDENTIAL:-}` in the estate compose
+  // expands to the EMPTY STRING when the variable is unset, and `migrator.ts` loads this same
+  // environment while dialling nobody at all. Treating empty as malformed would fail
+  // `community-migrate`, which the rest of the estate waits on through
+  // `service_completed_successfully` — so the empty check stays ahead of the shape check.
+  const env = loadEnv(base())
+  assert.equal(env.identityCredential, null)
+  assert.equal(env.serviceCredential, null)
+  assert.equal(loadEnv({ ...base(), COMMUNITY_IDENTITY_CREDENTIAL: '' }).identityCredential, null)
+  assert.equal(loadEnv({ ...base(), COMMUNITY_IDENTITY_CREDENTIAL: '   ' }).identityCredential, null)
+  assert.equal(loadEnv({ ...base(), COMMUNITY_SERVICE_CREDENTIAL: '' }).serviceCredential, null)
+})
+
+test('the exchange is dialled at IDENTITY_ISSUER unless IDENTITY_URL says otherwise', () => {
+  // Derived rather than demanded, so this fix needs no new line in any deploy manifest: the issuer
+  // of a token is by definition where that token came from. A deployment that exchanged against one
+  // identity and trusted the JWKS of another would fail with a signature error nobody would read as
+  // a configuration mistake.
+  assert.equal(loadEnv(base()).identityUrl, 'http://identity:4000')
+  assert.equal(
+    loadEnv({ ...base(), IDENTITY_URL: 'http://identity.internal:4000' }).identityUrl,
+    'http://identity.internal:4000',
+  )
 })
 
 test('a missing required variable names itself', () => {

@@ -57,9 +57,7 @@ import {
   sampleQueue,
   seedRecurring,
 } from './jobs.ts'
-import { httpLedgerClient } from './ledgerclient.ts'
-import { httpPolicyClient } from './policyclient.ts'
-import { indexerOracle, unavailableOracle } from './gating.ts'
+import { buildUpstreams } from './upstreams.ts'
 
 // 1. Environment. Importing `./env.ts` validated it; a missing or placeholder secret has already
 //    exited with a structured line naming the variable.
@@ -128,29 +126,69 @@ if (env.indexerBaseUrl !== null) {
 // 6. The upstream clients. One credential, presented to all three — a single service identity for
 //    this service, which is what SD-05's scoped service tokens are. The scopes it needs are named
 //    in `LEDGER_SCOPES`, `POLICY_SCOPES` and `INDEXER_SCOPES` so the deploy can mint exactly those.
-const token = () => env.serviceCredential
-const ledger = httpLedgerClient({
-  baseUrl: env.ledgerBaseUrl,
-  token,
-  deadlineMs: env.ledgerDeadlineMs,
+//
+//    The wiring lives in `upstreams.ts` rather than here, and that is not tidiness: wiring in the
+//    composition root is wiring no test can reach — importing this file starts a server — which is
+//    how `const token = () => env.serviceCredential` survived a full green suite while the token it
+//    read had been expired for 26 hours (micro-org #222). `servicetoken.test.ts` drives
+//    `buildUpstreams` past the expiry, and reverting it turns that file red.
+const upstreams = buildUpstreams(env, {
   originatingService: SERVICE,
-})
-const policy = httpPolicyClient({
-  baseUrl: env.policyBaseUrl,
-  token,
-  deadlineMs: env.policyDeadlineMs,
-})
-// No indexer URL is a SUPPORTED mode, and the oracle that results knows nothing rather than
-// reporting zero. A zero would demote every token-gated member on the first pass. See gating.ts.
-const oracle =
-  env.indexerBaseUrl === null
-    ? unavailableOracle()
-    : indexerOracle({
-        baseUrl: env.indexerBaseUrl,
-        token,
-        deadlineMs: env.indexerDeadlineMs,
-        network: env.indexerNetwork,
+  onEvent: (event) => {
+    metrics.increment('community_service_token_events_total', { kind: event.kind })
+    if (event.kind === 'minted') {
+      // The token itself is never a field here, and must never become one. `service`, `expiresIn`
+      // and the refresh interval are what an operator needs; the bearer is what an attacker needs.
+      logger.info('minted a service token from the credential', {
+        service: event.service,
+        expiresIn: event.expiresIn,
+        refreshInMs: event.refreshInMs,
       })
+    } else if (event.kind === 'exchange_failed') {
+      // `warn`, not `fatal`, and only because of `hadUsableToken`: a failed exchange while a live
+      // token is still held is the outage the provider is built to ride out, and paging on it would
+      // page on every identity blip.
+      logger.warn('service credential exchange failed', { ...event })
+    }
+  },
+})
+const { ledger, policy, oracle } = upstreams
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Said at boot, at the level its consequence deserves, because the alternative is what actually
+// happened: a governance service that looks entirely healthy while every treasury spend it is asked
+// to make comes back "refused by policy" from a gate that was never asked.
+//
+// There is NO readiness probe on this — see the header of `upstreams.ts`. Postgres stays the only
+// hard probe, because voting, delegation, discussion, membership and every read work perfectly
+// without a credential; taking governance out of the balancer would punish the many routes that do
+// not need it to protect the one that does, and every replica reads the same environment anyway. So
+// the credential is said loudly here and sampled continuously as `community_service_token_usable`.
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+if (upstreams.mode === 'none') {
+  logger.fatal('NO CREDENTIAL AT ALL — every ledger, policy and indexer call will fail', {
+    whatWillHappen:
+      'no bearer is presented, so no treasury spend can post to the ledger and no spend can be ' +
+      'approved. The execute job fails rather than recording a refusal, so nothing is spent while ' +
+      'we cannot ask — but community_proposals_timelocked climbs for ever and no vote is honoured.',
+    remedy: 'set COMMUNITY_IDENTITY_CREDENTIAL (long-lived, cfsc_…, from POST /service-credentials)',
+  })
+} else if (upstreams.mode === 'static') {
+  logger.fatal('EXPIRING TOKEN, NOT A CREDENTIAL — every upstream call will 401 about ten minutes from now', {
+    // Said out loud so the failure an operator will hit is one they can search for.
+    whatWillHappen:
+      'COMMUNITY_SERVICE_CREDENTIAL holds a token that lives 600s and nothing can renew it. From ' +
+      'minute ten policy answers 401, policyclient.ts reads a 4xx as policy DECIDING and returns ' +
+      'deny/policy_401, executions.ts raises SpendRefusedError and jobs.ts SWALLOWS it — so every ' +
+      'treasury spend is permanently REFUSED, recorded against the community, and never retried. ' +
+      'The ledger 401s into LedgerRefusedError, which is the never-retry class, and token gating ' +
+      'stops running with every re-check answering unknown.',
+    remedy:
+      'set COMMUNITY_IDENTITY_CREDENTIAL in the deploy; estate-bootstrap.sh already mints it into tokens.env',
+  })
+} else {
+  logger.info('service credential mode', { mode: upstreams.mode, identityUrl: env.identityUrl })
+}
 
 // 7. The queue.
 //
@@ -179,6 +217,23 @@ const server = createServer({
     await refresh()
     await sampleQueue(sql, metrics)
     await sampleGovernance(sql, metrics)
+
+    // Read out of the provider's own memory — no request is made, so a scrape cannot become load on
+    // identity. `static` counts as usable because it IS, for about ten minutes, which is exactly why
+    // it needs the second gauge beside it rather than a kinder reading of the first. Together they
+    // answer what nothing could answer while the token was dead for 26 hours: can this process
+    // authenticate right now, and is it even able to renew?
+    metrics.set(
+      'community_service_token_usable',
+      upstreams.mode === 'exchanged'
+        ? (upstreams.identityTokens?.snapshot().hasUsableToken ?? false)
+          ? 1
+          : 0
+        : upstreams.mode === 'static'
+          ? 1
+          : 0,
+    )
+    metrics.set('community_service_token_static', upstreams.mode === 'static' ? 1 : 0)
   },
 })
 

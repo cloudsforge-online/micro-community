@@ -239,6 +239,34 @@ export function registerServiceMetrics(metrics: Metrics): Metrics {
       labels: [],
     })
     .register({
+      // ────────────────────────────────────────────────────────────────────────────────────────
+      // micro-org #222. The question that had no answer anywhere while this service's token sat
+      // expired for 26 hours on a container reporting healthy: `/livez` needs no upstream, so no
+      // probe in the estate ever presented the credential to anybody.
+      //
+      // Deliberately NOT "a token is present". The provider keeps an expired token after it dies
+      // because `expiresInSeconds` going steadily negative is the most useful thing an operator can
+      // be shown — but a gauge that read presence would report 1 across exactly the outage this
+      // exists to see, which is a check that cannot fail.
+      // ────────────────────────────────────────────────────────────────────────────────────────
+      name: 'community_service_token_usable',
+      help: 'Whether this process can authenticate to the ledger, policy and the indexer right now. 0 means every treasury spend is about to be recorded as REFUSED by a gate that was never asked (micro-org #222).',
+      kind: 'gauge',
+      labels: [],
+    })
+    .register({
+      name: 'community_service_token_static',
+      help: '1 when this container was given a pre-minted token instead of a credential. It reads 1 for the ten minutes before the token dies, so it is the gauge that predicts the cliff rather than the one that reports it.',
+      kind: 'gauge',
+      labels: [],
+    })
+    .register({
+      name: 'community_service_token_events_total',
+      help: 'Credential exchange lifecycle, by kind. `exchange_failed` climbing while `minted` does not means identity is refusing this credential — check it has not been revoked.',
+      kind: 'counter',
+      labels: ['kind'],
+    })
+    .register({
       name: 'community_events_rejected_total',
       help: 'Inbound events refused, by reason. `bad_signature` above zero means something is posting unsigned events at the inbox.',
       kind: 'counter',
