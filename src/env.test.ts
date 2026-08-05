@@ -19,19 +19,38 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { SecretError } from '@cloudsforge/secrets'
 
 const ENV_SOURCE = readFileSync(fileURLToPath(new URL('./env.ts', import.meta.url)), 'utf8')
 const EXAMPLE = readFileSync(fileURLToPath(new URL('../.env.example', import.meta.url)), 'utf8')
 
-/** A configuration that boots. Every test starts from this and removes or corrupts one field. */
+/** Generated per call, never committed. See the note on `base()` below. */
+function generated(): string {
+  return randomBytes(48).toString('base64')
+}
+
+/**
+ * A configuration that boots. Every test starts from this and removes or corrupts one field.
+ *
+ * The two outbox-family values are GENERATED rather than written. They used to be `'a'.repeat(32)`
+ * and `'b'.repeat(32)` — long enough for the old 24-character floor, on no deny-list, and carrying
+ * no entropy whatsoever, which is exactly the shape of the value that sat on 54 lines of a PUBLIC
+ * compose file and passed every guard in the estate (micro-org #142). A fixture exempt from the
+ * rule it exercises is how that survived every test in the estate.
+ *
+ * `COMMUNITY_SERVICE_CREDENTIAL` stays a written fixture on purpose: it is NOT part of the outbox
+ * key family, it is issued by identity in its own format rather than generated with `openssl`, and
+ * it is still validated by the weaker `requiredSecret`.
+ */
 function base(): Record<string, string> {
   return {
     COMMUNITY_DATABASE_URL: 'postgres://community:pw@postgres:5432/community',
     IDENTITY_JWKS_URL: 'http://identity:4000/.well-known/jwks.json',
     IDENTITY_ISSUER: 'http://identity:4000',
-    COMMUNITY_INGEST_SECRETS: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    OUTBOX_SIGNING_SECRET: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    COMMUNITY_INGEST_SECRETS: generated(),
+    OUTBOX_SIGNING_SECRET: generated(),
     LEDGER_BASE_URL: 'http://ledger:4000',
     POLICY_BASE_URL: 'http://policy:4000',
     COMMUNITY_SERVICE_CREDENTIAL: 'cccccccccccccccccccccccccccccccc',
@@ -148,13 +167,24 @@ test('the test DSN variable is spelled exactly as the workflow derives it', () =
 test('CHANGE_ME does not boot', () => {
   // A default secret in source is not convenient, it is catastrophic, and a placeholder that boots
   // is a placeholder that reaches production.
-  for (const name of ['OUTBOX_SIGNING_SECRET', 'COMMUNITY_SERVICE_CREDENTIAL']) {
-    assert.throws(() => loadEnv({ ...base(), [name]: 'CHANGE_ME' }), EnvError)
-    assert.throws(() => loadEnv({ ...base(), [name]: 'changeme' }), EnvError)
-    // Short is refused too — length is the only entropy proxy available.
-    assert.throws(() => loadEnv({ ...base(), [name]: 'short' }), EnvError)
+  //
+  // `COMMUNITY_SERVICE_CREDENTIAL` is the one still held by `requiredSecret`, so it is the one that
+  // still raises this file's own `EnvError`. It is not part of the outbox key family: identity
+  // issues it in its own format rather than `openssl` generating it, and demanding base64 of it
+  // would refuse the correct value.
+  assert.throws(() => loadEnv({ ...base(), COMMUNITY_SERVICE_CREDENTIAL: 'CHANGE_ME' }), EnvError)
+  assert.throws(() => loadEnv({ ...base(), COMMUNITY_SERVICE_CREDENTIAL: 'changeme' }), EnvError)
+  assert.throws(() => loadEnv({ ...base(), COMMUNITY_SERVICE_CREDENTIAL: 'short' }), EnvError)
+
+  // The outbox key family raises `SecretError` instead, and the class is distinct on purpose: it
+  // says a value failed the SHAPE check rather than this file's own parsing. `fatalConfig` reads
+  // `err.message` off `unknown`, so the boot line an operator sees is identical either way.
+  for (const name of ['OUTBOX_SIGNING_SECRET', 'COMMUNITY_INGEST_SECRETS']) {
+    assert.throws(() => loadEnv({ ...base(), [name]: 'CHANGE_ME' }), SecretError)
+    assert.throws(() => loadEnv({ ...base(), [name]: 'changeme' }), SecretError)
+    // And short is refused in BYTES of key material, not in keystrokes.
+    assert.throws(() => loadEnv({ ...base(), [name]: 'short' }), /bytes of key material/)
   }
-  assert.throws(() => loadEnv({ ...base(), COMMUNITY_INGEST_SECRETS: 'CHANGE_ME' }), EnvError)
 })
 
 test('.env.example ships CHANGE_ME placeholders and no real values', () => {
@@ -186,16 +216,85 @@ test('a missing required variable names itself', () => {
 /* ------------------------------------------------------------------ the secret list */
 
 test('the ingest secret list is a list, and refuses duplicates', () => {
-  const parsed = parseSecretList('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'X')
+  const first = generated()
+  const second = generated()
+  const parsed = parseSecretList(`${first},${second}`, 'X')
   assert.equal(parsed.length, 2)
   // A duplicated secret makes "which key verified this" ambiguous, and that answer is what tells an
   // operator whether a rotation has finished.
-  assert.throws(
-    () => parseSecretList('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'X'),
-    /same secret twice/,
-  )
+  assert.throws(() => parseSecretList(`${first},${first}`, 'X'), /same secret twice/)
+  // An empty list is still this file's own refusal, so the message names the service's variable
+  // rather than a generic one.
   assert.throws(() => parseSecretList('', 'X'), EnvError)
-  assert.throws(() => parseSecretList('short', 'X'), EnvError)
+  assert.throws(() => parseSecretList(' , , ', 'X'), /at least one secret/)
+  // A short entry is now measured in bytes of key material by the shape check.
+  assert.throws(() => parseSecretList('short', 'X'), SecretError)
+})
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * micro-org #142. The shape check, against the strings that were actually deployed.
+ * ──────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Real strings, not invented ones: each was deployed or set in CI, and each cleared the old guard —
+ * a deny-list of exact strings plus a 24-character floor — because it was on no list and was long
+ * enough. If a future edit weakens the floor it fails against evidence rather than against taste.
+ */
+const DEPLOYED_PLACEHOLDERS = [
+  'estate-only-outbox-secret-00000000000000', // 54 lines of a PUBLIC compose file, 40 chars
+  'ci-only-not-a-real-secret-000000000000', // the value 23 CI workflows set, this one included
+  'K2sN4vQ8xR1wB6tY9zL3mF7hC5jD0pA4', // 32 chars of base64 alphabet, and only 24 bytes
+  '0'.repeat(64), // right alphabet, right length, no entropy at all
+] as const
+
+/** Names the variable, names the fix, and carries no part of the value. */
+function refusalIsSafe(err: unknown, variable: string, value: string): true {
+  const message = (err as Error).message
+  // The reason this guard exists is that the value was readable. A message carrying it would move
+  // the secret from one public place to the log collector.
+  assert.ok(!message.includes(value), 'the refusal echoed the value')
+  assert.match(message, new RegExp(variable))
+  assert.match(message, /openssl rand -base64 48/)
+  return true
+}
+
+test('THE VALUES THAT SAT IN A PUBLIC REPOSITORY ARE REFUSED, as a scalar', () => {
+  for (const value of DEPLOYED_PLACEHOLDERS) {
+    assert.throws(
+      () => loadEnv({ ...base(), OUTBOX_SIGNING_SECRET: value }),
+      (err: unknown) => refusalIsSafe(err, 'OUTBOX_SIGNING_SECRET', value),
+      `${value.slice(0, 6)}… was accepted as OUTBOX_SIGNING_SECRET`,
+    )
+  }
+})
+
+test('THE SAME BAR ON A LIST ENTRY — a rotation window is not a place the rule relaxes', () => {
+  // The OUTGOING key is the one an attacker already holds if it leaked, so "just for the drain" is
+  // exactly how a placeholder survives the rotation that was supposed to remove it. Second position
+  // on purpose: the first entry being genuine must not vouch for the rest.
+  const good = generated()
+  for (const value of DEPLOYED_PLACEHOLDERS) {
+    assert.throws(
+      () => loadEnv({ ...base(), COMMUNITY_INGEST_SECRETS: `${good},${value}` }),
+      (err: unknown) => {
+        assert.ok(!(err as Error).message.includes(good), 'the refusal echoed the good key beside it')
+        return refusalIsSafe(err, 'COMMUNITY_INGEST_SECRETS', value)
+      },
+      `${value.slice(0, 6)}… was accepted as a COMMUNITY_INGEST_SECRETS entry`,
+    )
+  }
+})
+
+test('a generated secret is accepted, in either alphabet, scalar or list', () => {
+  // The floors are measured rather than guessed, so a guard that occasionally refused correct input
+  // — which is a guard somebody removes — would show up here.
+  assert.doesNotThrow(() =>
+    loadEnv({
+      ...base(),
+      OUTBOX_SIGNING_SECRET: randomBytes(48).toString('base64'),
+      COMMUNITY_INGEST_SECRETS: `${randomBytes(48).toString('base64')},${randomBytes(32).toString('hex')}`,
+    }),
+  )
 })
 
 /* ------------------------------------------------------------------ ranges and defaults */
