@@ -5,12 +5,12 @@
  * ## THE TREASURY SPEND THAT WAS REFUSED BY A GATE NOBODY ASKED
  *
  * `COMMUNITY_SERVICE_CREDENTIAL` held a **token**, and a token identity mints lives **600 seconds**
- * (`identity/src/tokens.ts:33`). The composition root read it once, at import:
+ * (`identity/src/tokens.ts`). The composition root read it once, at import:
  *
- *     const token = () => env.serviceCredential     // index.ts:131, for the life of the process
+ *     const token = () => env.serviceCredential     // index.ts, for the life of the process
  *
- * and handed that one function to the ledger (`:134`), to policy (`:140`) and to the indexer oracle
- * (`:150`). There was no `ServiceTokenProvider`, no `POST /service-tokens/exchange` and no `cfsc_`
+ * and handed that one function to the ledger, to policy and to the indexer oracle
+ *. There was no `ServiceTokenProvider`, no `POST /service-tokens/exchange` and no `cfsc_`
  * anywhere in `src/` — checked by grep, not inferred. So every outbound call this service makes
  * authenticated **once per bootstrap** and never again, while the container ran for days.
  *
@@ -26,11 +26,11 @@
  * unjudged. Here the failure has a direction, and it points at the member:
  *
  *   1. Policy answers **401**. That is a 4xx, so `HttpError.peerDecided` is true.
- *   2. `policyclient.ts:192-197` reads a decided 4xx as **policy deciding** and returns
+ *   2. `policyclient.ts` reads a decided 4xx as **policy deciding** and returns
  *      `{decision: 'deny', reasons: ['policy_401']}` — correctly, given what it can see; a 401 is
  *      indistinguishable at that layer from policy refusing the request as malformed.
- *   3. `executions.ts:290` turns any non-`allow` into `SpendRefusedError`.
- *   4. `jobs.ts:353-357` **swallows** a refusal — deliberately, because "a refusal is an answer, and
+ *   3. `executions.ts` turns any non-`allow` into `SpendRefusedError`.
+ *   4. `jobs.ts` **swallows** a refusal — deliberately, because "a refusal is an answer, and
  *      retrying it until the job dead-letters would turn one decision into eight".
  *
  * So the job completes, `community_executions_total{outcome="refused"}` climbs, and the log line
@@ -178,14 +178,14 @@ export function buildUpstreams(env: UpstreamEnv, options: UpstreamOptions): Upst
    *
    * **Rejects rather than resolving `undefined` when there is nothing to present.** `HttpClient`
    * omits the header entirely for `undefined`, so the request would go out unauthenticated, come
-   * back 401 — and `policyclient.ts:192-197` would read that 401 as policy DECIDING and record a
+   * back 401 — and `policyclient.ts` would read that 401 as policy DECIDING and record a
    * `deny` against a community whose vote was never actually put to the gate. Policy is not down and
    * the spend was not refused; nobody gave this service a credential. Those are three different
    * mornings, and keeping them apart is the point.
    *
    * Rejecting keeps the failure on the right side of that line. `ServiceTokenUnavailableError` is
    * not an `HttpError`, so `policyclient.ts` cannot read it as a decision: it becomes
-   * `PolicyUnavailableError`, `jobs.ts:356` RE-THROWS that, the job is retried with backoff and the
+   * `PolicyUnavailableError`, `jobs.ts` RE-THROWS that, the job is retried with backoff and the
    * treasury is not touched while we cannot ask. Resolving `undefined` instead would convert the
    * same fault into a permanent, swallowed refusal. It is the same reasoning as `Verifier` answering
    * 503 on an unreachable JWKS: a fault in the thing that decides authentication is not evidence

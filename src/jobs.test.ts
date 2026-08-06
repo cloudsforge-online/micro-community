@@ -125,7 +125,7 @@ async function timelockedSpend(): Promise<Proposal> {
 /* ------------------------------------------------------------------ the schedule */
 
 test('every recurring job is keyed by the resource it contends on', { skip }, () => {
-  // `@cloudsforge/jobs` index.ts:16 — the key names the contended resource, not the row. All four
+  // `@cloudsforge/jobs` index.ts — the key names the contended resource, not the row. All four
   // recurring jobs contend on a shared range (the outbox stream, a status scan, a re-check queue,
   // a bulk DELETE), so all four are `global`.
   for (const job of RECURRING) {

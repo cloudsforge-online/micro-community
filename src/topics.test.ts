@@ -273,7 +273,7 @@ test('the delivery this relay signs is one a contract-following consumer verifie
 /**
  * A guard that proves a topic name is correct proves nothing about whether the emit is reached.
  *
- * `identity/src/sessions.ts:390` exports `emitSessionRevoked` and NOTHING CALLS IT — `revokeSession`
+ * `identity/src/sessions.ts` exports `emitSessionRevoked` and NOTHING CALLS IT — `revokeSession`
  * and `revokeAllSessions` update rows without emitting — so `identity.session.revoked` is produced
  * by dead code while identity's own guard passes, because it scans literals rather than
  * reachability. This is the cheapest check that catches that exact shape.

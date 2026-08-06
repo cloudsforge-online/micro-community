@@ -25,7 +25,7 @@ export const TOPICS = Object.freeze({
   proposalOpened: 'community.proposal.opened',
   proposalClosed: 'community.proposal.closed',
   /**
-   * The one 07-dependency-map.md:180 names. Keyed by `proposal_id`, consumed by ledger, activity
+   * The one 07-dependency-map.md names. Keyed by `proposal_id`, consumed by ledger, activity
    * and notify.
    *
    * It carries `ledgerEntryId` because that is the only thing a consumer can reconcile against:
@@ -59,7 +59,7 @@ export const TOPIC_NAMES: readonly Topic[] = Object.freeze(Object.values(TOPICS)
 export const USER_DELETED_TOPIC = 'identity.user.deleted'
 
 /**
- * `billing.entitlement.granted` / `.revoked` — 07-dependency-map.md:174-175 names community as a
+ * `billing.entitlement.granted` / `.revoked` — 07-dependency-map.md names community as a
  * consumer of both. A community plan buys capacity, never governance (15-monetisation §3.10:
  * "a community that cannot vote until it pays is not a community"), so acting on these must never
  * touch a proposal, a vote or a treasury.

@@ -4,7 +4,7 @@
 
 Communities and governance. Communities, membership, roles, treasury accounts, proposals,
 discussion, votes, delegations, timelocks and executions —
-[03-repository-responsibilities.md:47](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/03-repository-responsibilities.md).
+[03-repository-responsibilities.md](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/03-repository-responsibilities.md).
 
 Design authority: [`ecosystem/03-repository-responsibilities.md`](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/03-repository-responsibilities.md)
 
@@ -83,7 +83,7 @@ exists and no row says so. `LEDGER_DEADLINE_MS` bounds how long it is held.
 The cost of the first ordering is a row that exists for a moment naming no entry. That is what
 `executions_spend_names_entry` is for — a **deferred constraint trigger**, checked at COMMIT, so a
 treasury spend cannot become durable without its ledger entry id. The same mechanism
-`ledger/src/migrations.ts:324` uses for the balancing invariant, chosen for the same reason: the
+`ledger/src/migrations.ts` uses for the balancing invariant, chosen for the same reason: the
 fact is only true once the transaction has finished writing. `migrations.test.ts` reads
 `pg_trigger.tginitdeferred` to prove it is genuinely deferred, and `executions.test.ts` proves both
 directions — a COMMIT without the entry id fails, and the row may legally exist un-named
@@ -233,8 +233,8 @@ scope matchers that disagree:
 
 | Package | Line | Semantics |
 | --- | --- | --- |
-| `contracts/packages/auth` | `src/index.ts:209` | `granted.includes(required)` — exact match only |
-| `runtime/packages/auth` | `src/index.ts:178` | honours one wildcard level: `foo:*` grants `foo:bar` |
+| `contracts/packages/auth` | `src/index.ts` | `granted.includes(required)` — exact match only |
+| `runtime/packages/auth` | `src/index.ts` | honours one wildcard level: `foo:*` grants `foo:bar` |
 
 Both are shipped, both are CI-green, and §3.3h leaves both as they are deliberately — changing an
 authorisation matcher relaxes or tightens every consumer at once, and it is a decision about what a
@@ -300,13 +300,13 @@ being true and is left standing is worse than one that was never written down.
 
 ### 1. Policy cannot express a community subject, and has no community action
 
-`07-dependency-map.md:140` makes policy a **hard, fail-closed** dependency of this service for
+`07-dependency-map.md` makes policy a **hard, fail-closed** dependency of this service for
 "Treasury spend approval". Two facts about the deployed policy service:
 
-- `policy/src/actions.ts:89-163` is the closed action registry and contains **no `community.*`
-  action**. `parseRequestAction` (`policy/src/server.ts:651-656`) answers **400** for an
+- `policy/src/actions.ts` is the closed action registry and contains **no `community.*`
+  action**. `parseRequestAction` (`policy/src/server.ts`) answers **400** for an
   unregistered name.
-- `SUBJECT_PATTERN` (`policy/src/server.ts:94`) is
+- `SUBJECT_PATTERN` (`policy/src/server.ts`) is
   `^(?:system|(?:user|service|operator):[A-Za-z0-9._:-]{1,128})$`. There is **no `community:` arm**,
   so the subject a community treasury spend is *about* is the one policy has no grammar for.
 
@@ -317,7 +317,7 @@ treasury**, presenting as a passed vote that silently never executes. That is th
 as moderation.
 
 **So this client calls the route that exists with the action that exists**: `POST /decisions`,
-`action: ledger.treasury_spend` (`policy/src/actions.ts:107-111` — "a spend from a platform treasury
+`action: ledger.treasury_spend` (`policy/src/actions.ts` — "a spend from a platform treasury
 account rather than a user account", `failMode: closed`), `subject: service:community`, with the
 community and proposal in the `resource` URN, which policy stores verbatim.
 
@@ -326,13 +326,13 @@ subject, so a per-community spend cap cannot be expressed until policy grows a `
 arm and a `community.treasury.spend` action. `clients.test.ts` asserts both facts about policy as
 literals, so the day either changes, this repository's tests say so.
 
-Also: `market/src/policyclient.ts:27` declares `POLICY_SCOPES = ['policy:evaluate']`, which is not a
-scope policy knows — `policy/src/server.ts:83` defines `DECIDE_SCOPE = 'policy:decide'`. This
+Also: `market/src/policyclient.ts` declares `POLICY_SCOPES = ['policy:evaluate']`, which is not a
+scope policy knows — `policy/src/server.ts` defines `DECIDE_SCOPE = 'policy:decide'`. This
 repository uses `policy:decide`.
 
 ### 2. The indexer's balance route — named here, then built, and now called
 
-**Resolved.** `07-dependency-map.md:139` makes the indexer a **hard** dependency of this service's
+**Resolved.** `07-dependency-map.md` makes the indexer a **hard** dependency of this service's
 token-gate re-evaluation job "at a snapshot block", and when this repository was written that
 dependency could not be satisfied: `micro-indexer` had no balance route and no balances table. The
 response was `micro-admin-api`'s (§3.3g) — *name the route the upstream would need and refuse to
@@ -395,13 +395,13 @@ state that a chain indexer does not and should not hold. It is a gap in the esta
 than an unbuilt route, and it fails as an outage until something owns it.
 
 One correction to the note this section used to carry: `micro-indexer` **does** serve `/v1` paths.
-`PREFIXES` (`indexer/src/server.ts:124`) mounts every domain route under both `/v1` and bare. The
+`PREFIXES` (`indexer/src/server.ts`) mounts every domain route under both `/v1` and bare. The
 old calls 404'd because there is no `/tokens` route and no `/escrow` sub-resource, not because of
 the prefix.
 
 ### 5. `community.*` is not a registered event topic
 
-`07-dependency-map.md:180` names `community.proposal.executed`, keyed by `proposal_id`, with ledger,
+`07-dependency-map.md` names `community.proposal.executed`, keyed by `proposal_id`, with ledger,
 activity and notify as its consumers. `contracts/packages/events/src/index.ts` registers **no
 `community.*` topic**, though `'community'` *is* a valid `ProducerService` in that file's union — so
 the gap is an omission from `TOPICS` rather than a decision that this service produces nothing. The

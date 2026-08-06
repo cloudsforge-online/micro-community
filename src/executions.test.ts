@@ -470,7 +470,7 @@ test('the executed event is written in the same transaction and names the entry'
   `
   assert.equal(rows.length, 1)
   const event = rows[0]!
-  // Keyed by proposal_id, as 07-dependency-map.md:180 states.
+  // Keyed by proposal_id, as 07-dependency-map.md states.
   assert.equal(event.key, proposal.id)
   assert.equal(event.correlation_id, 'corr-9')
   // The only thing a consumer can reconcile against.

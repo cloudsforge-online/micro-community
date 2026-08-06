@@ -219,7 +219,7 @@ export interface Env {
    *
    * `IDENTITY_URL` overrides it for the one deployment where the two genuinely differ: an issuer
    * published under a public name and dialled internally. Same spelling and same default as
-   * `ledger/src/env.ts:476`, `market/src/env.ts:407` and `foresight/src/env.ts:571`, because a
+   * `ledger/src/env.ts`, `market/src/env.ts` and `foresight/src/env.ts`, because a
    * variable that means the same thing in four services must not be spelled four ways.
    */
   readonly identityUrl: string
@@ -231,14 +231,14 @@ export interface Env {
   readonly outboxSigningSecret: string
 
   /**
-   * The ledger. A **hard** dependency (07-dependency-map.md:137, `money-write`): a treasury spend
+   * The ledger. A **hard** dependency (07-dependency-map.md, `money-write`): a treasury spend
    * is a ledger posting, and there is no version of this service that can execute one without it.
    */
   readonly ledgerBaseUrl: string
   readonly ledgerDeadlineMs: number
 
   /**
-   * Policy. A **hard, fail-closed** dependency (07-dependency-map.md:140) for treasury spend
+   * Policy. A **hard, fail-closed** dependency (07-dependency-map.md) for treasury spend
    * approval. Unreachable means the spend does not happen — see `policyclient.ts` for what this
    * service had to do about policy's action registry having no `community.*` entry.
    */
@@ -259,22 +259,22 @@ export interface Env {
    * **The long-lived credential this process exchanges for a live service token.**
    *
    * This is the fix for micro-org #222. `COMMUNITY_SERVICE_CREDENTIAL` below held a **token**, and a
-   * token minted by identity lives 600 seconds (`identity/src/tokens.ts:33`). `index.ts:131` read it
+   * token minted by identity lives 600 seconds (`identity/src/tokens.ts`). `index.ts` read it
    * once at import — `const token = () => env.serviceCredential` — and handed that one string to the
    * ledger, to policy and to the indexer oracle, so this service authenticated once per bootstrap
    * and never again while the container ran for days.
    *
    * The consequence here is worse than a failed call, and worse than in market where the same seam
-   * was fixed first. A 401 from policy is a 4xx, so `policyclient.ts:192-197` reads it as policy
-   * DECIDING and returns `{decision: 'deny', reasons: ['policy_401']}`; `executions.ts:290` turns
-   * that into `SpendRefusedError`; and `jobs.ts:353-357` **swallows** a refusal, because a refusal is
+   * was fixed first. A 401 from policy is a 4xx, so `policyclient.ts` reads it as policy
+   * DECIDING and returns `{decision: 'deny', reasons: ['policy_401']}`; `executions.ts` turns
+   * that into `SpendRefusedError`; and `jobs.ts` **swallows** a refusal, because a refusal is
    * an answer and retrying it would turn one decision into eight. So a dead credential does not
    * stall a treasury spend — it **permanently refuses every one of them**, records the refusal
    * against the community, and completes the job. A community's passed vote is answered "policy said
    * no" when policy was never asked.
    *
    * `@cloudsforge/auth`'s `ServiceTokenProvider` exchanges this at `POST /service-tokens/exchange`
-   * (`identity/src/server.ts:1615`) for a 600-second token and refreshes at a jittered 80% of its
+   * (`identity/src/server.ts`) for a 600-second token and refreshes at a jittered 80% of its
    * life on traffic. The exchange consumes nothing, so N replicas boot from one credential and a
    * restart days later still works. **The 600 seconds is deliberately unchanged**: rotation IS
    * expiry, and a longer TTL is the same defect arriving later and hurting more.

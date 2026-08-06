@@ -2,7 +2,7 @@
  * Run a mutating operation at most once per key.
  *
  * **The shape is the ledger's** (`ledger/src/idempotency.ts`), which took it from
- * `repos/forge-pay/services/pay/src/store.ts:153`. It is not reinvented here; it is inherited,
+ * `repos/forge-pay/services/pay/src/store.ts`. It is not reinvented here; it is inherited,
  * because the four properties below are the whole of the correctness and each of them is easy to
  * lose while writing something that looks equivalent:
  *

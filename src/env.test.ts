@@ -42,7 +42,7 @@ function generated(): string {
  * which every placeholder this estate ever wrote would have failed — passes mainnet and kills
  * testnet at boot. Keeping a hyphenated credential here means that mistake fails CI instead of
  * failing one estate in production. Do not "tidy" the hyphens out of this value.
- * (`admin-api/src/env.test.ts:14-22` carries the same fixture for the same reason.)
+ * (`admin-api/src/env.test.ts` carries the same fixture for the same reason.)
  */
 const CREDENTIAL = 'cfsc_TToR-eOeVTDnqhX1-nu6-u7DoCr4MCfa86g4g6kd404'
 
@@ -91,8 +91,8 @@ function base(): Record<string, string> {
 // `env.ts` validates `process.env` at IMPORT and exits the process on a bad configuration — right
 // for a service, fatal for a test runner. So populate a valid environment first, then import it
 // dynamically. `loadEnv` itself is pure over its source, so every case below passes an explicit
-// object and never touches `process.env`. The estate's pattern; `lantern/src/env.test.ts:21` and
-// `devplatform/src/env.test.ts:27` are the siblings that document it.
+// object and never touches `process.env`. The estate's pattern; `lantern/src/env.test.ts` and
+// `devplatform/src/env.test.ts` are the siblings that document it.
 for (const [key, value] of Object.entries(base())) process.env[key] = value
 const { EnvError, SERVICE, loadEnv, parseSecretList } = await import('./env.ts')
 const { TEST_DSN_VAR } = await import('./testsupport.ts')
@@ -247,8 +247,8 @@ test('A SERVICE TOKEN PASTED INTO EITHER CREDENTIAL IS REFUSED BY NAME', () => {
   // a 24-character floor, which a several-hundred-character `ey…` clears without effort.
   //
   // A token cannot renew itself. Ten minutes after the boot that read it, policy answers 401,
-  // `policyclient.ts:192-197` reads that 4xx as policy DECIDING, and every treasury spend comes back
-  // `deny`/`policy_401` — swallowed by `jobs.ts:353-357` as an answer. So the refusal must happen
+  // `policyclient.ts` reads that 4xx as policy DECIDING, and every treasury spend comes back
+  // `deny`/`policy_401` — swallowed by `jobs.ts` as an answer. So the refusal must happen
   // HERE, at boot, with the variable named.
   // ══════════════════════════════════════════════════════════════════════════════════════════
   for (const name of ['COMMUNITY_IDENTITY_CREDENTIAL', 'COMMUNITY_SERVICE_CREDENTIAL']) {

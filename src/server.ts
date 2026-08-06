@@ -1203,7 +1203,7 @@ function buildRoutes(): Route[] {
  * |                           |            | shape CHECK covers, and it was being left behind.   |
  * | discussion_posts.author   | anonymise  | Same as proposals.author.                           |
  * | discussion_posts.body     | anonymise  | **The body was being kept.** `redacted_at` only     |
- * |                           |            | masks it on READ (`proposals.ts:444`); the text the |
+ * |                           |            | masks it on READ (`proposals.ts`); the text the |
  * |                           |            | person wrote — which is free-form and routinely     |
  * |                           |            | contains their own personal data — stayed in the    |
  * |                           |            | table. Redaction-on-read is a display rule, not     |

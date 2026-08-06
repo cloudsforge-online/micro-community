@@ -19,7 +19,7 @@
  * ## Why this matters more here than in most services
  *
  * `community.proposal.executed` is read by ledger, activity and notify
- * (07-dependency-map.md:180). It is the event that says a community's vote became money moving.
+ * (07-dependency-map.md). It is the event that says a community's vote became money moving.
  * If it is published after the commit and the process dies in between, a treasury has been spent
  * and nothing in the estate knows — no feed entry, no notification to the members who voted, and
  * a reconciliation that has to be done by reading journal entries. If it is published before the
@@ -252,7 +252,7 @@ interface SubscriptionRow {
  *     would be refused outright, and refusing an event because nobody handed it a request id
  *     would lose the event rather than the trace.
  *   - **`actor` falls back to `service:community`.** This service's most important emit is the
- *     scheduled transition at `jobs.ts:220`, which has NO user actor because nobody performed the
+ *     scheduled transition at `jobs.ts`, which has NO user actor because nobody performed the
  *     act — and `serviceActor` is precisely what the contract spells for that. `null` is not an
  *     actor the contract has a word for.
  */

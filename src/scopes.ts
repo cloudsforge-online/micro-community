@@ -7,8 +7,8 @@
  * 18-build-status.md §3.3h records a divergence that is a decision rather than a defect:
  *
  *   | Package                    | Line               | Semantics                                |
- *   | `contracts/packages/auth`  | `src/index.ts:209` | `granted.includes(required)` — exact only |
- *   | `runtime/packages/auth`    | `src/index.ts:178` | honours one wildcard level: `foo:*` → `foo:bar` |
+ *   | `contracts/packages/auth`  | `src/index.ts` | `granted.includes(required)` — exact only |
+ *   | `runtime/packages/auth`    | `src/index.ts` | honours one wildcard level: `foo:*` → `foo:bar` |
  *
  * Both are shipped, both are CI-green, and §3.3h leaves both as they are deliberately — changing
  * an authorisation matcher is the highest-blast-radius edit available in this estate. **Neither
@@ -78,7 +78,7 @@ export function grantsScope(granted: readonly string[], required: Scope): boolea
  * The same question about a verified principal.
  *
  * Deliberately not `hasScope` from `@cloudsforge/auth`, which honours one wildcard level
- * (`runtime/packages/auth/src/index.ts:178`). A test asserts the difference is real rather than
+ * (`runtime/packages/auth/src/index.ts`). A test asserts the difference is real rather than
  * theoretical, so this comment cannot rot into a claim nobody checks.
  */
 export function principalGrants(principal: Principal, required: Scope): boolean {

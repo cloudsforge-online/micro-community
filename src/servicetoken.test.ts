@@ -5,17 +5,17 @@
  * ## The defect, as measured rather than as reasoned about
  *
  * `COMMUNITY_SERVICE_CREDENTIAL` held a token that lives **600 seconds**
- * (`identity/src/tokens.ts:33`). The composition root read it once, at import —
- * `const token = () => env.serviceCredential` (`index.ts:131`) — and handed that to the ledger, to
+ * (`identity/src/tokens.ts`). The composition root read it once, at import —
+ * `const token = () => env.serviceCredential` (`index.ts`) — and handed that to the ledger, to
  * policy and to the indexer oracle. On the live estate (2026-08-05) the value in that variable had
  * been **expired for 26 hours** on a container reporting healthy, because `/livez` needs no upstream
  * and therefore never presents the credential to anybody.
  *
  * ## Why the symptom is a DENIAL rather than an absence
  *
- * A 401 is a 4xx, so `HttpError.peerDecided` is true, so `policyclient.ts:192-197` reads it as
- * **policy deciding** and answers `{decision: 'deny', reasons: ['policy_401']}`. `executions.ts:290`
- * turns any non-`allow` into `SpendRefusedError`, and `jobs.ts:353-357` **swallows** a refusal —
+ * A 401 is a 4xx, so `HttpError.peerDecided` is true, so `policyclient.ts` reads it as
+ * **policy deciding** and answers `{decision: 'deny', reasons: ['policy_401']}`. `executions.ts`
+ * turns any non-`allow` into `SpendRefusedError`, and `jobs.ts` **swallows** a refusal —
  * deliberately, because a refusal is an answer and retrying it would turn one decision into eight.
  *
  * So a community that voted, waited out its timelock and passed a spend is told the platform refused
@@ -88,7 +88,7 @@ const INDEXER = 'http://indexer:4000'
  */
 const CREDENTIAL = 'cfsc_TToR-eOeVTDnqhX1-nu6-u7DoCr4MCfa86g4g6kd404'
 
-/** identity/src/tokens.ts:33. Unchanged by this fix, and it must stay unchanged — rotation IS expiry. */
+/** identity/src/tokens.ts. Unchanged by this fix, and it must stay unchanged — rotation IS expiry. */
 const SERVICE_TTL_SECONDS = 600
 
 /** What this service actually demands of its own token, read from the files that declare it. */
@@ -397,8 +397,8 @@ test('BASELINE: the seam this replaced turns a PASSED vote into a REFUSED one at
   const after = await upstreams.policy.evaluateSpend(SPEND)
 
   // ── **THE 26 HOURS, REPRODUCED.** ───────────────────────────────────────────────────────────
-  // Not an error, not a degraded flag: a `deny`. `executions.ts:290` turns this into
-  // `SpendRefusedError` and `jobs.ts:353-357` SWALLOWS it as an answer, so the job completes,
+  // Not an error, not a degraded flag: a `deny`. `executions.ts` turns this into
+  // `SpendRefusedError` and `jobs.ts` SWALLOWS it as an answer, so the job completes,
   // `community_executions_total{outcome="refused"}` climbs, and the members of a community that
   // voted and waited out a timelock are told the platform refused their spend — by a gate that was
   // never asked. Nothing anywhere names this container's own credential.

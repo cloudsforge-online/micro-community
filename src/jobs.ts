@@ -36,7 +36,7 @@
  *   `retention`          Two DELETEs over the same range. Harmless, and doubles the load of the
  *                        heaviest statement this service runs.
  *
- * The lease key names the contended resource, not the row — `@cloudsforge/jobs` `index.ts:16`. For
+ * The lease key names the contended resource, not the row — `@cloudsforge/jobs` `index.ts`. For
  * four of these that resource is a shared range, so the key is `global`. For `proposal.execute` the
  * resource genuinely IS the row, and `jobs.test.ts` proves both halves: two runners with different
  * owners and one due execution produce exactly one execution and one ledger entry, and two

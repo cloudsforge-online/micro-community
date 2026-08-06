@@ -295,7 +295,7 @@ test('every topic this service produces is named for it and past tense', { skip:
 })
 
 test('the one topic the dependency map names is present and keyed by proposal', { skip }, async () => {
-  // 07-dependency-map.md:180 — `community.proposal.executed`, keyed by `proposal_id`, consumed by
+  // 07-dependency-map.md — `community.proposal.executed`, keyed by `proposal_id`, consumed by
   // ledger, activity and notify.
   assert.equal(TOPICS.proposalExecuted, 'community.proposal.executed')
   await withOutbox(asDb(sql), 'community', async (_tx, emit) => {

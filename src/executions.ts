@@ -35,7 +35,7 @@
  * The cost of that ordering is a row that exists for a moment without naming its entry. That is
  * what `executions_spend_names_entry` is for: a DEFERRED constraint trigger, checked at COMMIT, so
  * a treasury spend cannot become durable without its ledger entry id. The same mechanism
- * `ledger/src/migrations.ts:324` uses for the balancing invariant, chosen for the same reason —
+ * `ledger/src/migrations.ts` uses for the balancing invariant, chosen for the same reason —
  * the fact is only true once the transaction has finished writing.
  *
  * **THE LEDGER CALL HAPPENS INSIDE THE DATABASE TRANSACTION**, which holds a Postgres transaction
@@ -147,7 +147,7 @@ export async function executeProposal(
   // THE POLICY GATE RUNS BEFORE THE TRANSACTION OPENS, AND IT IS FAIL-CLOSED.
   //
   // Before, because it is a network call and holding a row lock across two upstreams doubles the
-  // window. Fail-closed because `07-dependency-map.md:140` says so and because SD-10 puts every
+  // window. Fail-closed because `07-dependency-map.md` says so and because SD-10 puts every
   // money-movement control in that column: an unreachable policy service throws
   // `PolicyUnavailableError`, which propagates, which fails the job, which leaves the proposal
   // `timelocked` for the next attempt. Nothing is spent while we do not know whether it should be.

@@ -5,7 +5,7 @@
  * **THE TEST THIS FILE EXISTS FOR IS `community:* GRANTS NOTHING HERE`.**
  *
  * 18-build-status.md §3.3h records that the estate ships two scope matchers which disagree:
- * `contracts/packages/auth/src/index.ts:209` is exact, `runtime/packages/auth/src/index.ts:178`
+ * `contracts/packages/auth/src/index.ts` is exact, `runtime/packages/auth/src/index.ts`
  * honours one wildcard level. Both are CI-green and neither is wrong on its own terms, and §3.3h
  * leaves both as they are deliberately — an authorisation matcher is the highest-blast-radius edit
  * in this estate. **Neither package is changed by this repository.**

@@ -8,7 +8,7 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  * **THE BALANCE ROUTE EXISTS NOW, AND THIS CLIENT CALLS IT.**
  *
- * `07-dependency-map.md:139` makes the indexer a **hard** dependency of this job "at a snapshot
+ * `07-dependency-map.md` makes the indexer a **hard** dependency of this job "at a snapshot
  * block", and until 18-build-status.md §3.3j that dependency could not be satisfied: the indexer
  * had no balance route and no balances table. It now serves
  * `GET /addresses/:chain/:network/:address/token-balances?contract=&block=`, which is the exact

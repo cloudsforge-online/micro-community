@@ -147,7 +147,7 @@ export interface SpendInput {
  * becomes one, that is a second posting with its own approval rather than a quiet third leg here.
  *
  * `purpose: 'treasury'` on the debit side is the value `contracts-money` reserves for exactly
- * this (`packages/money/src/index.ts:200-207`), which is why a community treasury does not need a
+ * this (`packages/money/src/index.ts`), which is why a community treasury does not need a
  * new account purpose invented for it.
  */
 export function spendPostings(input: SpendInput): readonly PostingRequest[] {
@@ -211,7 +211,7 @@ interface RawEntry {
 }
 
 /**
- * `POST /entries`, verified against `ledger/src/server.ts:346` rather than assumed.
+ * `POST /entries`, verified against `ledger/src/server.ts` rather than assumed.
  *
  * Not `/v1/entries`: the ledger serves no `/v1` prefix — its route table is `/entries`,
  * `/reservations`, `/accounts/:subject/balances`, `/trial-balance` — and `micro-wallet` calling

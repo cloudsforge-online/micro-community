@@ -1,7 +1,7 @@
 /**
  * The policy service, as this service uses it.
  *
- * `07-dependency-map.md:140` makes policy a **hard, fail-closed** dependency of this service for
+ * `07-dependency-map.md` makes policy a **hard, fail-closed** dependency of this service for
  * "Treasury spend approval". That is the correct direction: an unchecked spend from a community
  * treasury is money leaving an account nobody can undo, and SD-10 puts every money-movement
  * control in the fail-closed column. So an unreachable policy service means the execution does
@@ -14,11 +14,11 @@
  * Two facts about the deployed policy service, read from its source rather than from the
  * dependency map:
  *
- *   1. `policy/src/actions.ts:89-163` is the closed action registry, and it contains no
- *      `community.*` action. `parseRequestAction` (`policy/src/server.ts:651-656`) answers **400**
+ *   1. `policy/src/actions.ts` is the closed action registry, and it contains no
+ *      `community.*` action. `parseRequestAction` (`policy/src/server.ts`) answers **400**
  *      for an unregistered name — deliberately, so a caller cannot invent an action and receive a
  *      vacuous allow.
- *   2. `SUBJECT_PATTERN` (`policy/src/server.ts:94`) is
+ *   2. `SUBJECT_PATTERN` (`policy/src/server.ts`) is
  *      `^(?:system|(?:user|service|operator):[A-Za-z0-9._:-]{1,128})$`. There is no `community:`
  *      arm. The subject a community treasury spend is *about* is exactly the one policy has no
  *      grammar for, so `subject: 'community:<id>'` is a **400** too.
@@ -31,7 +31,7 @@
  *
  * **So this client calls the route that exists, with the action that exists.**
  * `ledger.treasury_spend` — "A spend from a platform treasury account rather than a user account",
- * `failMode: closed`, `policy/src/actions.ts:107-111` — is the registered action for precisely
+ * `failMode: closed`, `policy/src/actions.ts` — is the registered action for precisely
  * this decision, and the subject is `service:community`, which policy's grammar accepts. The
  * community is carried in `resource` as a URN, which policy stores verbatim, so a decision row
  * read months later says which community and which proposal without a lookup table.
@@ -62,7 +62,7 @@ import type { LiveScope } from '@cloudsforge/contracts-auth'
  * The consequence is not a 403 on one call. `micro-deploy`'s `derive-grants.mjs` reads this
  * constant into `IDENTITY_SERVICE_TOKEN_GRANTS`, and identity validates that list against the
  * registry at import and REFUSES TO START on a name it does not know
- * (`identity/src/env.ts:141`). An unregistered demand here is a dead identity container, and
+ * (`identity/src/env.ts`). An unregistered demand here is a dead identity container, and
  * therefore no tokens for anybody.
  *
  * ── AND `LiveScope` RATHER THAN `Scope` ───────────────────────────────────────────────────────
@@ -74,7 +74,7 @@ import type { LiveScope } from '@cloudsforge/contracts-auth'
  *
  * `LiveScope = Exclude<Scope, DeprecatedScope>`, and `DeprecatedScope` is computed FROM `SCOPES`
  * by a conditional type over the `deprecated` field rather than hand-listed
- * (`contracts/packages/auth/src/index.ts:507`), so it cannot drift from the registry — a
+ * (`contracts/packages/auth/src/index.ts`), so it cannot drift from the registry — a
  * hand-written companion list is the failure that package keeps catching.
  *
  * `Scope` deliberately keeps its wide meaning and this does not narrow it: a token arriving from
@@ -160,7 +160,7 @@ export function httpPolicyClient(options: PolicyClientOptions): PolicyClient {
     async evaluateSpend(input) {
       let body: { decision?: { decision?: string; reasons?: readonly string[] } }
       try {
-        // `POST /decisions`. Policy has NO `/v1` routes at all (`policy/src/server.ts:337`) and
+        // `POST /decisions`. Policy has NO `/v1` routes at all (`policy/src/server.ts`) and
         // takes the action in the body rather than the path.
         body = await client.request('/decisions', {
           method: 'POST',
@@ -172,7 +172,7 @@ export function httpPolicyClient(options: PolicyClientOptions): PolicyClient {
             context: {
               // A DECIMAL STRING. Policy rejects a JSON number outright rather than coercing it,
               // because a threshold comparison on a float is the bug that service exists not to
-              // have (`policy/src/server.ts:658` — `DECIMAL_PATTERN`).
+              // have (`policy/src/server.ts` — `DECIMAL_PATTERN`).
               amount: input.amount,
               asset: input.assetCode,
               // Carried in the context so a rule can be written against them the day policy grows

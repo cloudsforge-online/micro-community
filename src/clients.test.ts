@@ -81,7 +81,7 @@ function recorder(reply: { status: number; body: unknown }): {
 /* ------------------------------------------------------------------ the ledger */
 
 /**
- * `micro-ledger`'s real route table, read from `ledger/src/server.ts:324-528`.
+ * `micro-ledger`'s real route table, read from `ledger/src/server.ts`.
  *
  * There is no `/v1` prefix anywhere in it. `micro-wallet`'s `GET /v1/quotes` against a pricing
  * service serving `GET /rates` is the recorded cost of assuming otherwise.
@@ -316,10 +316,10 @@ test('the ledger scope asked for is exact and minimal', () => {
 /**
  * `micro-policy`'s real closed sets, read from source rather than from the dependency map.
  *
- * ACTION registry: `policy/src/actions.ts:89-163`. `parseRequestAction`
- * (`policy/src/server.ts:651-656`) answers **400** for anything not in it.
+ * ACTION registry: `policy/src/actions.ts`. `parseRequestAction`
+ * (`policy/src/server.ts`) answers **400** for anything not in it.
  *
- * SUBJECT grammar: `policy/src/server.ts:94`.
+ * SUBJECT grammar: `policy/src/server.ts`.
  */
 const POLICY_ACTIONS: readonly string[] = Object.freeze([
   'custody.key.export',
@@ -341,14 +341,14 @@ test('there is no community.* action in policy, which is why the action is ledge
   // ══════════════════════════════════════════════════════════════════════════════════════════
   // A RECORDED FINDING, and the reason this client is shaped as it is.
   //
-  // 07-dependency-map.md:140 makes policy a hard, fail-closed dependency of this service for
+  // 07-dependency-map.md makes policy a hard, fail-closed dependency of this service for
   // "Treasury spend approval". Policy's action registry contains no `community.*` entry, and an
   // unregistered action is a deliberate 400. A client sending the obvious `community.treasury.spend`
   // would 400 on every spend — and with a fail-closed gate, NO COMMUNITY COULD EVER SPEND ITS
   // TREASURY, presenting as a passed vote that silently never executes.
   //
   // `ledger.treasury_spend` — "A spend from a platform treasury account rather than a user
-  // account", failMode closed, policy/src/actions.ts:107-111 — is the registered action for this
+  // account", failMode closed, policy/src/actions.ts — is the registered action for this
   // decision, and it is what this client sends.
   // ══════════════════════════════════════════════════════════════════════════════════════════
   assert.ok(
@@ -363,7 +363,7 @@ test('there is no community.* action in policy, which is why the action is ledge
 
 test('the subject sent to policy satisfies policy\'s own grammar', () => {
   // ══════════════════════════════════════════════════════════════════════════════════════════
-  // THE SECOND HALF OF THE SAME FINDING. `SUBJECT_PATTERN` at policy/src/server.ts:94 has no
+  // THE SECOND HALF OF THE SAME FINDING. `SUBJECT_PATTERN` at policy/src/server.ts has no
   // `community:` arm, so the subject a community treasury spend is actually ABOUT cannot be
   // expressed. `service:community` is what policy accepts, and the community travels in the
   // resource URN — which policy stores verbatim, so a decision row read months later says which
@@ -493,7 +493,7 @@ test('an unreadable 201 is not an allow', async () => {
 })
 
 test('the policy scope matches what policy requires', () => {
-  // `policy/src/server.ts:83` — `DECIDE_SCOPE = 'policy:decide'`. `micro-market`'s client declared
+  // `policy/src/server.ts` — `DECIDE_SCOPE = 'policy:decide'`. `micro-market`'s client declared
   // `policy:evaluate`, which is not a scope policy knows.
   assert.deepEqual([...POLICY_SCOPES], ['policy:decide'])
 })
@@ -571,7 +571,7 @@ test('the oracle asks the indexer for the chain by slug, at the block it was giv
   const url = new URL(calls[0]!.url)
   assert.equal(url.pathname, `/addresses/ember/testnet/${HOLDER}/token-balances`)
   assert.equal(url.searchParams.get('contract'), '0xabc')
-  // The snapshot block 07-dependency-map.md:139 asks for, spelled as the indexer's `block` param.
+  // The snapshot block 07-dependency-map.md asks for, spelled as the indexer's `block` param.
   assert.equal(url.searchParams.get('block'), '99')
 })
 

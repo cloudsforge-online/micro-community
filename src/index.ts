@@ -13,7 +13,7 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  * **WHICH PROBES ARE HARD, AND WHY THE ANSWER IS NOT THE DEPENDENCY MAP'S.**
  *
- * `07-dependency-map.md:137-140` marks ledger **hard**, policy **hard (fail-closed)**, identity
+ * `07-dependency-map.md` marks ledger **hard**, policy **hard (fail-closed)**, identity
  * soft, and indexer **hard for the re-evaluation job**. Readiness is a different question from
  * dependency strength, and conflating them takes services out of the load balancer for outages
  * they can survive:
