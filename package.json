@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/community",
-  "version": "2026.08.28",
+  "version": "2026.08.29",
   "private": true,
   "description": "Communities and governance. Communities, membership, roles, treasury accounts, proposals, discussion, votes, delegations, timelocks and executions. A governance system moves money by vote, so this service holds no money — a treasury account is a micro-ledger account and a spend is a ledger entry — a member's voting power is counted exactly once by a unique constraint, a delegation cycle is refused by a trigger, a timelock is enforced by the database rather than by a handler, and a passed proposal executes exactly once under a lease keyed on the proposal.",
   "license": "MIT",
