@@ -14,6 +14,7 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 
+import { networkSql, type Sql as RuntimeSql } from '@cloudsforge/db'
 import { test, before, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
 import type { AddressInfo } from 'node:net'
@@ -79,7 +80,8 @@ before(async () => {
     logger: quietLogger(),
     metrics: testMetrics(),
     verifier,
-    sql: asDb(sql),
+    sql: singleNetworkSql(asDb(sql)),
+    singleNetwork: 'mainnet' as const,
     producer: 'community',
     ingestSecrets: ['a-signing-secret-long-enough-000'],
     queue: new JobQueue(sql as unknown as JobsSql, { owner: 'test', leaseMs: 60_000 }),
@@ -765,3 +767,12 @@ test('a request with no credential is a 401', { skip }, async () => {
   const community = await seedCommunity(sql, { ownerSubject: ALICE })
   assert.equal((await call('GET', `/v1/communities/${community.id}`)).status, 401)
 })
+
+/**
+ * One handle, presented as the per-network selector the server now takes. The fixture runs against
+ * a single test database, so mainnet is the only configured network — which exercises the REFUSAL
+ * path for free: anything reaching for testnet throws rather than reusing this handle.
+ */
+function singleNetworkSql(db: unknown) {
+  return networkSql({ mainnet: db as RuntimeSql })
+}

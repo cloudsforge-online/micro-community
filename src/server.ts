@@ -55,6 +55,8 @@ import {
 } from 'node:http'
 import { ForbiddenError, TokenError, bearerFrom, statusFor, type Principal } from '@cloudsforge/auth'
 import type { Lifecycle } from '@cloudsforge/lifecycle'
+import { NetworkUnknownError, requestNetwork, type Network } from '@cloudsforge/http'
+import type { NetworkSql } from '@cloudsforge/db'
 import { Metrics, newRequestId, type Logger } from '@cloudsforge/telemetry'
 import type { JobQueue } from '@cloudsforge/jobs'
 import {
@@ -156,7 +158,16 @@ export interface ServerDeps {
   readonly logger: Logger
   readonly metrics: Metrics
   readonly verifier: { principal(token: string): Promise<Principal> }
-  readonly sql: Db
+  /**
+   * The per-network SELECTOR, not a handle. Routes use `ctx.sql`; `NetworkSql` has no query
+   * methods, so reaching for the process-wide handle does not compile.
+   */
+  readonly sql: NetworkSql
+  /**
+   * The network to assume when no `CF-Network` arrives, or `undefined` to refuse. `CF_NETWORK_SINGLE`,
+   * for `pnpm dev`, which has no gateway in front of it. Never set in production.
+   */
+  readonly singleNetwork?: Network
   readonly producer: string
   readonly ingestSecrets: readonly string[]
   readonly queue: JobQueue
@@ -289,7 +300,32 @@ interface RequestContext {
   readonly requestId: string
   readonly log: Logger
   readonly params: Readonly<Record<string, string>>
+  /**
+   * The network THIS REQUEST belongs to, from the `CF-Network` header the gateway stamped.
+   *
+   * Not a property of the process: one pod serves both estates since the network consolidation
+   * (micro-deploy `docs/network-consolidation.md`), so "which network am I" has no answer.
+   */
+  readonly network: Network
+  /**
+   * The database handle for `network`, resolved ONCE, at the edge of the request.
+   *
+   * Every route uses this rather than reaching for the process-wide handle, because a wrong handle
+   * is not an error — it is a query that SUCCEEDS against the other estate's rows and says nothing.
+   * `deps.sql` is a `NetworkSql` with no query methods, so the mistake does not compile.
+   */
+  readonly sql: Db
 }
+
+/**
+ * Routes that answer without belonging to a network.
+ *
+ * Kubelet probes the first two and Prometheus scrapes the third; none arrives through the gateway,
+ * so none carries `CF-Network`. Refusing them makes every health probe a 500 and the pod never
+ * becomes ready. Three literal paths rather than a prefix, because this is an exemption from a data
+ * boundary; none of them queries the database.
+ */
+const OPERATIONAL_ROUTES: ReadonlySet<string> = new Set(['/livez', '/readyz', '/metrics'])
 
 interface Route {
   readonly method: string
@@ -348,23 +384,61 @@ export function createServer(deps: ServerDeps): Server {
     inFlight += 1
     deps.metrics.set('http_requests_in_flight', inFlight)
 
-    const finish = (status: number) => {
+    const finish = (status: number, metricNetwork: string) => {
       inFlight -= 1
       deps.metrics.set('http_requests_in_flight', inFlight)
       const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6
-      deps.metrics.increment('http_requests_total', { method, route: routeLabel, status: String(status) })
-      deps.metrics.observe('http_request_duration_ms', durationMs, { method, route: routeLabel })
+      deps.metrics.increment('http_requests_total', {
+        method,
+        route: routeLabel,
+        status: String(status),
+        // One target now serves both estates, so the network has to be on the SERIES. Labelled
+        // per target it would say nothing — micro-org#398 in a form nothing could recover.
+        network: metricNetwork,
+      })
+      deps.metrics.observe('http_request_duration_ms', durationMs, {
+        method,
+        route: routeLabel,
+        network: metricNetwork,
+      })
     }
 
-    void handle(matched, { req, url, requestId, log, params }, deps)
+    // ── THE NETWORK, THEN THE HANDLE, BEFORE ANY ROUTE RUNS ──────────────────────────────────
+    //
+    // `requestNetwork` REFUSES an unstamped request rather than assuming mainnet: a 500 is a
+    // routing fault made loud, where a default is a cross-network write nothing would ever flag.
+    //
+    // The operational endpoints are exempt because kubelet and Prometheus do not come through the
+    // gateway and never send the header. Refusing them makes the pod never become ready.
+    const networkless = matched !== undefined && OPERATIONAL_ROUTES.has(matched.path)
+    let network: Network
+    try {
+      network = networkless
+        ? (deps.singleNetwork ?? deps.sql.networks[0] ?? 'mainnet')
+        : requestNetwork(req.headers, deps.singleNetwork ? { fallback: deps.singleNetwork } : {})
+    } catch (err) {
+      log.error('request carries no usable network', {
+        err: err instanceof NetworkUnknownError ? err.message : err,
+      })
+      send(
+        res,
+        errorReply(500, 'network_unknown', 'this request could not be attributed to a network', requestId),
+        requestId,
+      )
+      finish(500, 'unknown')
+      return
+    }
+
+    const sql = deps.sql.for(network) as unknown as Db
+    void handle(matched, { req, url, requestId, log, params, network, sql }, deps)
       .then((reply) => {
         send(res, reply, requestId)
-        finish(reply.status)
+        finish(reply.status, network)
       })
       .catch((err: unknown) => {
         log.error('request handler threw after mapping', { err })
         send(res, errorReply(500, 'internal', 'the request could not be completed', requestId), requestId)
-        finish(500)
+        finish(500, network)
       })
   })
 }
@@ -487,9 +561,9 @@ async function authoriseCommunity(
   allowed: readonly Role[] | 'read',
 ): Promise<{ caller: UserPrincipal; community: Community; role: Role | null }> {
   const caller = await authenticateUser(ctx, deps)
-  const community = await findCommunity(deps.sql, communityId)
+  const community = await findCommunity(ctx.sql, communityId)
   if (!community) throw new NotFoundError('no such community')
-  const role = await roleIn(deps.sql, community.id, caller.subject)
+  const role = await roleIn(ctx.sql, community.id, caller.subject)
 
   if (allowed === 'read') {
     if (community.kind === 'public' || community.kind === 'project' || community.kind === 'creator') {
@@ -587,7 +661,7 @@ function buildRoutes(): Route[] {
     define('GET', '/v1/communities', async (ctx, deps) => ({
       status: 200,
       body: {
-        communities: (await listCommunities(deps.sql, pageSize(ctx))).map(wireCommunity),
+        communities: (await listCommunities(ctx.sql, pageSize(ctx))).map(wireCommunity),
       },
     })),
 
@@ -598,7 +672,7 @@ function buildRoutes(): Route[] {
 
     define('GET', '/v1/communities/:id/members', async (ctx, deps) => {
       const { community } = await authoriseCommunity(ctx, deps, idParam(ctx), 'read')
-      const members = await listMembers(deps.sql, community.id, pageSize(ctx))
+      const members = await listMembers(ctx.sql, community.id, pageSize(ctx))
       return {
         status: 200,
         body: {
@@ -615,7 +689,7 @@ function buildRoutes(): Route[] {
 
     define('POST', '/v1/communities/:id/members', async (ctx, deps) => {
       const caller = await authenticateUser(ctx, deps)
-      const community = await findCommunity(deps.sql, idParam(ctx))
+      const community = await findCommunity(ctx.sql, idParam(ctx))
       if (!community) throw new NotFoundError('no such community')
       const body = await readJson(ctx.req)
 
@@ -646,7 +720,7 @@ function buildRoutes(): Route[] {
       const role = requireEnum(body, 'role', isRole)
       const target = decodeURIComponent(ctx.params['subject'] ?? '')
 
-      const outcome = await deps.sql.begin(async (tx) => {
+      const outcome = await ctx.sql.begin(async (tx) => {
         const pending: Parameters<Emit>[0][] = []
         const membership = await setRole(tx as Tx, (event) => pending.push(event), {
           communityId: community.id,
@@ -687,7 +761,7 @@ function buildRoutes(): Route[] {
 
     define('GET', '/v1/communities/:id/roles', async (ctx, deps) => {
       const { community } = await authoriseCommunity(ctx, deps, idParam(ctx), 'read')
-      return { status: 200, body: { roles: await listCommunityRoles(deps.sql, community.id) } }
+      return { status: 200, body: { roles: await listCommunityRoles(ctx.sql, community.id) } }
     }),
 
     /* ---------------------------------------------------------------- treasury */
@@ -712,7 +786,7 @@ function buildRoutes(): Route[] {
 
     define('GET', '/v1/communities/:id/treasury-accounts', async (ctx, deps) => {
       const { community } = await authoriseCommunity(ctx, deps, idParam(ctx), 'read')
-      const accounts = await listTreasuryAccounts(deps.sql, community.id)
+      const accounts = await listTreasuryAccounts(ctx.sql, community.id)
       return {
         status: 200,
         body: {
@@ -773,13 +847,13 @@ function buildRoutes(): Route[] {
 
     define('GET', '/v1/communities/:id/proposals', async (ctx, deps) => {
       const { community } = await authoriseCommunity(ctx, deps, idParam(ctx), 'read')
-      const proposals = await listProposals(deps.sql, community.id, pageSize(ctx))
+      const proposals = await listProposals(ctx.sql, community.id, pageSize(ctx))
       return { status: 200, body: { proposals: proposals.map(wireProposal) } }
     }),
 
     define('GET', '/v1/proposals/:id', async (ctx, deps) => {
       const proposal = await requireProposal(ctx, deps, 'read')
-      const execution = await findExecution(deps.sql, proposal.id)
+      const execution = await findExecution(ctx.sql, proposal.id)
       return {
         status: 200,
         body: {
@@ -791,7 +865,7 @@ function buildRoutes(): Route[] {
 
     define('POST', '/v1/proposals/:id/open', async (ctx, deps) => {
       const proposal = await requireProposal(ctx, deps, ADMIN_ROLES, { orAuthor: true })
-      const outcome = await deps.sql.begin(async (tx) => ({
+      const outcome = await ctx.sql.begin(async (tx) => ({
         value: await openForDiscussion(tx as Tx, proposal.id),
       }))
       if (outcome.value.status === 'missing') throw new NotFoundError('no such proposal')
@@ -803,7 +877,7 @@ function buildRoutes(): Route[] {
 
     define('POST', '/v1/proposals/:id/cancel', async (ctx, deps) => {
       const proposal = await requireProposal(ctx, deps, ADMIN_ROLES, { orAuthor: true })
-      const outcome = await deps.sql.begin(async (tx) => ({
+      const outcome = await ctx.sql.begin(async (tx) => ({
         value: await cancelProposal(tx as Tx, proposal.id),
       }))
       if (outcome.value.status === 'missing') throw new NotFoundError('no such proposal')
@@ -838,7 +912,7 @@ function buildRoutes(): Route[] {
 
     define('GET', '/v1/proposals/:id/posts', async (ctx, deps) => {
       const proposal = await requireProposal(ctx, deps, 'read')
-      const posts = await listDiscussion(deps.sql, proposal.id, pageSize(ctx))
+      const posts = await listDiscussion(ctx.sql, proposal.id, pageSize(ctx))
       return {
         status: 200,
         body: {
@@ -857,17 +931,17 @@ function buildRoutes(): Route[] {
       // A moderator redacts. The row survives — see `listDiscussion` for why a hole in a thread is
       // worse than a marker.
       const caller = await authenticateUser(ctx, deps)
-      const rows = await deps.sql<{ community_id: string }[]>`
+      const rows = await ctx.sql<{ community_id: string }[]>`
         select p.community_id from discussion_posts d
           join proposals p on p.id = d.proposal_id
          where d.id = ${idParam(ctx)}
       `
       const communityId = rows[0]?.community_id
       if (!communityId) throw new NotFoundError('no such post')
-      const role = await roleIn(deps.sql, communityId, caller.subject)
+      const role = await roleIn(ctx.sql, communityId, caller.subject)
       if (!permits(role, MODERATOR_ROLES)) throw new ForbiddenInCommunityError('this action requires a moderator')
 
-      const outcome = await deps.sql.begin(async (tx) => ({
+      const outcome = await ctx.sql.begin(async (tx) => ({
         value: await redactPost(tx as Tx, idParam(ctx)),
       }))
       return { status: 200, body: { redacted: outcome.value } }
@@ -885,7 +959,7 @@ function buildRoutes(): Route[] {
       // a network call under an open transaction holds a connection for as long as the slowest
       // upstream. See `resolveBallot`.
       const ballot = await resolveBallot(
-        deps.sql,
+        ctx.sql,
         deps.weights ?? oneMemberOneVote,
         proposal,
         caller.subject,
@@ -929,7 +1003,7 @@ function buildRoutes(): Route[] {
       const proposal = await requireProposal(ctx, deps, VOTING_ROLES)
       const caller = await authenticateUser(ctx, deps)
       const target = ctx.url.searchParams.get('subject') ?? caller.subject
-      const outcome = await deps.sql.begin(async (tx) => ({
+      const outcome = await ctx.sql.begin(async (tx) => ({
         value: await withdrawVote(tx as Tx, proposal.id, target, caller.subject),
       }))
       return { status: 200, body: { withdrawn: outcome.value } }
@@ -937,7 +1011,7 @@ function buildRoutes(): Route[] {
 
     define('GET', '/v1/proposals/:id/votes', async (ctx, deps) => {
       const proposal = await requireProposal(ctx, deps, 'read')
-      const votes = await listVotes(deps.sql, proposal.id, pageSize(ctx))
+      const votes = await listVotes(ctx.sql, proposal.id, pageSize(ctx))
       return {
         status: 200,
         body: {
@@ -955,7 +1029,7 @@ function buildRoutes(): Route[] {
 
     define('GET', '/v1/proposals/:id/tally', async (ctx, deps) => {
       const proposal = await requireProposal(ctx, deps, 'read')
-      const weights = await weightsFor(deps.sql, proposal.id)
+      const weights = await weightsFor(ctx.sql, proposal.id)
       const result = tally(weights, { quorum: proposal.quorum, thresholdBps: proposal.thresholdBps })
       return {
         status: 200,
@@ -975,7 +1049,7 @@ function buildRoutes(): Route[] {
             // voting has no outcome, and saying otherwise invites reading a live count as a result.
             provisionalOutcome: result.outcome,
             reason: rejectionReason(result),
-            eligibleMembers: await countVotingMembers(deps.sql, proposal.communityId),
+            eligibleMembers: await countVotingMembers(ctx.sql, proposal.communityId),
           },
         },
       }
@@ -990,7 +1064,7 @@ function buildRoutes(): Route[] {
 
       // The delegate must be a voting member too. Delegating to somebody with no power is a
       // silently discarded vote, which is the worst possible outcome for the delegator.
-      const delegateRole = await roleIn(deps.sql, community.id, delegateSubject)
+      const delegateRole = await roleIn(ctx.sql, community.id, delegateSubject)
       if (!permits(delegateRole, VOTING_ROLES)) {
         throw new ValidationError('the delegate must be a voting member of this community')
       }
@@ -1019,7 +1093,7 @@ function buildRoutes(): Route[] {
 
     define('DELETE', '/v1/communities/:id/delegations', async (ctx, deps) => {
       const { caller, community } = await authoriseCommunity(ctx, deps, idParam(ctx), VOTING_ROLES)
-      const outcome = await deps.sql.begin(async (tx) => {
+      const outcome = await ctx.sql.begin(async (tx) => {
         const pending: Parameters<Emit>[0][] = []
         const revoked = await revokeDelegation(
           tx as Tx,
@@ -1036,8 +1110,8 @@ function buildRoutes(): Route[] {
     define('GET', '/v1/communities/:id/delegations', async (ctx, deps) => {
       const { caller, community } = await authoriseCommunity(ctx, deps, idParam(ctx), 'read')
       const [mine, delegators] = await Promise.all([
-        activeDelegation(deps.sql, community.id, caller.subject),
-        delegatorsFor(deps.sql, community.id, caller.subject),
+        activeDelegation(ctx.sql, community.id, caller.subject),
+        delegatorsFor(ctx.sql, community.id, caller.subject),
       ])
       return {
         status: 200,
@@ -1066,7 +1140,7 @@ function buildRoutes(): Route[] {
       // route, no header and no scope that changes that. An early call answers 409 `timelocked`.
       // ══════════════════════════════════════════════════════════════════════════════════════
       const outcome = await executeProposal(
-        { sql: deps.sql, ledger: deps.execute.ledger, policy: deps.execute.policy, producer: deps.producer },
+        { sql: ctx.sql, ledger: deps.execute.ledger, policy: deps.execute.policy, producer: deps.producer },
         (tx, event) => emitInTx(tx, deps.producer, event),
         { proposalId, executedBy: 'operator:manual', correlationId: ctx.requestId },
       )
@@ -1083,7 +1157,7 @@ function buildRoutes(): Route[] {
       // it does not execute, so it needs no treasury authority and carries `community:write`.
       await authenticateService(ctx, deps, WRITE_SCOPE)
       const proposalId = idParam(ctx)
-      const proposal = await findProposal(deps.sql, proposalId)
+      const proposal = await findProposal(ctx.sql, proposalId)
       if (!proposal) throw new NotFoundError('no such proposal')
       await deps.queue.enqueue({
         kind: EXECUTE_KIND,
@@ -1141,7 +1215,7 @@ function buildRoutes(): Route[] {
 
       const done = deps.lifecycle.track()
       try {
-        const outcome = await withInbox(deps.sql, topic, eventId, async (tx) =>
+        const outcome = await withInbox(ctx.sql, topic, eventId, async (tx) =>
           eraseSubject(tx, `user:${userId}`),
         )
         return {
@@ -1336,7 +1410,7 @@ async function withIdempotentRoute(
       'an Idempotency-Key header of 8 to 200 characters is required on every mutating request',
     )
   }
-  const outcome = await withIdempotency<Record<string, unknown>>(deps.sql, {
+  const outcome = await withIdempotency<Record<string, unknown>>(ctx.sql, {
     principal,
     route,
     clientKey: key,
@@ -1370,12 +1444,12 @@ async function requireProposal(
   allowed: readonly Role[] | 'read',
   options: { orAuthor?: boolean } = {},
 ): Promise<Proposal> {
-  const proposal = await findProposal(deps.sql, idParam(ctx))
+  const proposal = await findProposal(ctx.sql, idParam(ctx))
   if (!proposal) throw new NotFoundError('no such proposal')
   if (options.orAuthor === true) {
     const caller = await authenticateUser(ctx, deps)
     if (caller.subject === proposal.author) {
-      const role = await roleIn(deps.sql, proposal.communityId, caller.subject)
+      const role = await roleIn(ctx.sql, proposal.communityId, caller.subject)
       if (role !== null) return proposal
     }
   }
