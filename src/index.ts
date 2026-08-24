@@ -42,7 +42,7 @@
  */
 
 import postgres from 'postgres'
-import { assertSchemaAtLeast, type Sql } from '@cloudsforge/db'
+import { assertSchemaAtLeast, type Sql , networkSql, type Sql as RuntimeSql } from '@cloudsforge/db'
 import { JobQueue, JobRunner, type Sql as JobsSql } from '@cloudsforge/jobs'
 import { Verifier } from '@cloudsforge/auth'
 import { Lifecycle, httpProbe, installSignalHandlers, postgresProbe } from '@cloudsforge/lifecycle'
@@ -84,10 +84,19 @@ logger.info('starting', {
 
 // 3. The database pool. Opened before the schema assertion (which is a query) and before the
 //    Lifecycle (whose readiness probe closes over it).
-const sql = postgres(env.databaseUrl, {
+const poolOptions = {
   max: env.databasePoolMax,
   onnotice: () => {},
-})
+}
+const sql = postgres(env.databaseUrl, poolOptions)
+
+// ── ONE HANDLE PER NETWORK THIS DEPLOYMENT SERVES ────────────────────────────────────────────
+//
+// `COMMUNITY_DATABASE_URL_TESTNET` unset is the single-network case, which is every deployment until the
+// consolidation reaches this service. `networkSql` then holds one handle and REFUSES a testnet
+// request rather than answering it out of mainnet rows — substituting would be a query that
+// SUCCEEDS against the other estate and says nothing.
+const sqlTestnet = env.databaseUrlTestnet ? postgres(env.databaseUrlTestnet, poolOptions) : undefined
 const db = sql as unknown as Sql
 
 // 4. Assert the schema. This does NOT migrate. Failing here rather than serving is the point.
@@ -206,7 +215,12 @@ const server = createServer({
   logger,
   metrics,
   verifier,
-  sql,
+  // The SELECTOR, not a handle — routes use `ctx.sql`, resolved once per request.
+  sql: networkSql({
+    mainnet: sql as unknown as RuntimeSql,
+    ...(sqlTestnet ? { testnet: sqlTestnet as unknown as RuntimeSql } : {}),
+  }),
+  ...(env.singleNetwork ? { singleNetwork: env.singleNetwork as 'mainnet' | 'testnet' } : {}),
   producer: SERVICE,
   ingestSecrets: env.ingestSecrets,
   queue,
